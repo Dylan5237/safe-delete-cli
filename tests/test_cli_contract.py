@@ -713,6 +713,55 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(len((self.storage / "ledger.jsonl").read_text().splitlines()), 1)
         self.assertFalse((external / "nested").exists())
 
+    def test_restore_parent_creation_rejects_real_directory_replacement(self) -> None:
+        self.init_storage()
+        source = self.workspace / "real-race-source.txt"
+        source.write_text("content", encoding="utf-8")
+        code, add_payload = run_cli(self.storage, "add", "--", str(source))
+        self.assertEqual(code, 0, add_payload)
+        entry_id = add_payload["results"][0]["entry_id"]
+        payload = Path(add_payload["results"][0]["trashed_path"])
+        target = self.workspace / "real-raced" / "nested" / "target.txt"
+        parked = self.workspace / "parked-real-race"
+        parked.mkdir()
+
+        import safe_delete.cli as cli
+        import safe_delete.restore as restore
+
+        real_open = restore.os.open
+        replaced = False
+
+        def open_after_replace(
+            name: str,
+            flags: int,
+            *open_args: object,
+            dir_fd: int | None = None,
+            **open_kwargs: object,
+        ) -> int:
+            nonlocal replaced
+            current = self.workspace / "real-raced"
+            if name == "real-raced" and not replaced and current.is_dir():
+                os.rename(current, parked / "real-raced")
+                current.mkdir()
+                replaced = True
+            return real_open(name, flags, *open_args, dir_fd=dir_fd, **open_kwargs)
+
+        args = Namespace(
+            root=str(self.storage), entry_id=entry_id, restore_to=str(target),
+            create_parents=True,
+        )
+        with patch.object(restore.os, "open", side_effect=open_after_replace):
+            results, errors = cli._handle_restore(args)
+        self.assertTrue(replaced)
+        self.assertEqual(results, [])
+        self.assertEqual(errors[0].code, "storage_failure")
+        self.assertTrue(payload.is_file())
+        self.assertEqual(len((self.storage / "ledger.jsonl").read_text().splitlines()), 1)
+        self.assertTrue((self.workspace / "real-raced").is_dir())
+        self.assertTrue((parked / "real-raced").is_dir())
+        self.assertFalse(target.exists())
+        self.assertFalse((self.workspace / "real-raced" / "nested").exists())
+
     def test_restore_append_failure_human_output_includes_restore_and_trash_paths(self) -> None:
         self.init_storage()
         source = self.workspace / "append-failure-restore.txt"
@@ -743,6 +792,48 @@ class CliContractTests(unittest.TestCase):
         self.assertIn(f"trash path: {payload}", stderr.getvalue())
         self.assertFalse(source.exists())
         self.assertTrue(payload.is_file())
+
+    def test_restore_rollback_preserves_replaced_parent_directory(self) -> None:
+        self.init_storage()
+        source = self.workspace / "rollback-parent-source.txt"
+        source.write_text("content", encoding="utf-8")
+        code, add_payload = run_cli(self.storage, "add", "--", str(source))
+        self.assertEqual(code, 0, add_payload)
+        entry_id = add_payload["results"][0]["entry_id"]
+        payload = Path(add_payload["results"][0]["trashed_path"])
+        target = self.workspace / "rollback-raced" / "nested" / "target.txt"
+        parked = self.workspace / "parked-rollback-race"
+        parked.mkdir()
+
+        import safe_delete.cli as cli
+        import safe_delete.restore as restore
+        from safe_delete.errors import SafeDeleteError
+
+        injected = SafeDeleteError("ledger_failure", "restore append blocked")
+
+        def replace_before_append(layout: object, record: dict[str, object]) -> None:
+            created = self.workspace / "rollback-raced"
+            os.rename(created, parked / "rollback-raced")
+            created.mkdir()
+            raise injected
+
+        args = Namespace(
+            root=str(self.storage), entry_id=entry_id, restore_to=str(target),
+            create_parents=True,
+        )
+        with patch.object(restore, "append_event", side_effect=replace_before_append):
+            results, errors = cli._handle_restore(args)
+        self.assertEqual(results, [])
+        self.assertEqual(errors[0].code, "rollback_failed")
+        self.assertEqual(errors[0].details["cleanup_error"], "storage_failure")
+        self.assertTrue(errors[0].details["cleanup_preserved"])
+        self.assertTrue(payload.is_file())
+        self.assertEqual(len((self.storage / "ledger.jsonl").read_text().splitlines()), 1)
+        self.assertTrue((self.workspace / "rollback-raced").is_dir())
+        self.assertTrue((parked / "rollback-raced").is_dir())
+        self.assertFalse((self.workspace / "rollback-raced" / "nested").exists())
+        self.assertFalse((self.workspace / "rollback-raced" / "nested" / "target.txt").exists())
+        self.assertFalse((parked / "rollback-raced" / "nested" / "target.txt").exists())
 
     def test_restore_explicit_empty_destination_is_usage_error(self) -> None:
         self.init_storage()
