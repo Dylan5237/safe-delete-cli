@@ -9,3 +9,15 @@ The executable is `./safe-delete`. Storage defaults to
 `$HOME/.local/share/safe-delete`; pass `--root DIR` to select a test or
 project root. Machine-readable invocations use `--json`.
 
+`safe-delete purge` previews eligible entries by default. Set
+`SAFE_DELETE_RETENTION_DAYS` to a positive decimal integer, or use one of the
+per-invocation overrides `--older-than Nd`/`--older-than Nh` (for example
+`30d` or `720h`) and `--before RFC3339`. Physical removal requires both
+`--execute` and `--yes`:
+
+```cron
+0 2 * * * /usr/bin/safe-delete purge --execute --yes --json
+```
+
+Installing the cron/systemd timer is the operator's responsibility; the CLI
+does not install a scheduler.

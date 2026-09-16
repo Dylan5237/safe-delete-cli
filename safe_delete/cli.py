@@ -34,6 +34,8 @@ from .metadata import (
     validate_scalar,
 )
 from .move import atomic_move
+from .purge import run_purge
+from .retention import RetentionPolicy
 from .restore import restore_entry
 from .storage import (
     ensure_safe_target,
@@ -711,6 +713,25 @@ def _handle_restore(args: argparse.Namespace) -> tuple[list[Any], list[SafeDelet
             }
             result.update(metadata_from_record(entry.creation).projection_fields())
             return [result], []
+        if entry.state == "purged":
+            return [
+                {
+                    "entry_id": entry.entry_id,
+                    "state": "purged",
+                    "code": "already_purged",
+                    "original_path": entry.original_path,
+                    "kind": entry.kind,
+                }
+            ], []
+        if entry.state != "active":
+            return [], [
+                error(
+                    "entry_not_restorable",
+                    "entry is not restorable in its current lifecycle state",
+                    entry_id=entry.entry_id,
+                    state=entry.state,
+                )
+            ]
         try:
             result = restore_entry(
                 layout,
@@ -721,6 +742,24 @@ def _handle_restore(args: argparse.Namespace) -> tuple[list[Any], list[SafeDelet
         except SafeDeleteError as exc:
             return [], [exc]
     return [result], []
+
+
+def _handle_purge(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
+    if args.dry_run and args.execute:
+        return [], [error("usage_error", "--dry-run and --execute are mutually exclusive")]
+    if args.execute and not args.yes:
+        return [], [
+            error(
+                "usage_error",
+                "--execute requires --yes confirmation; no payloads were changed",
+            )
+        ]
+    policy = RetentionPolicy.resolve(
+        older_than=args.older_than,
+        before=args.before,
+    )
+    layout = require_layout(args.root)
+    return run_purge(layout, policy, execute=bool(args.execute))
 
 
 def _command_name(args: argparse.Namespace) -> str:
@@ -744,9 +783,9 @@ def _dispatch(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError
                 "schema_version": SCHEMA_VERSION,
             }
         ], []
-    if args.command in {"purge"} or (
-        args.command == "hook" and getattr(args, "hook_command", None) == "install"
-    ):
+    if args.command == "purge":
+        return _handle_purge(args)
+    if args.command == "hook" and getattr(args, "hook_command", None) == "install":
         return _handle_reserved(args)
     if args.command == "add":
         return _handle_add(args)

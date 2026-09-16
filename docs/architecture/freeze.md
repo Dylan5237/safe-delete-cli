@@ -821,6 +821,9 @@ enforcement and restore staging are separate boundaries.
   environment value or flag is `usage_error`. The selected threshold or
   absolute cutoff, together with the source selected by that precedence chain,
   is visible in dry-run JSON output.
+- `--older-than` accepts only a positive base-10 integer followed by `d` or `h`
+  (for example `30d` or `720h`); signs, decimals, whitespace, bare numbers,
+  and other units are `usage_error`.
 - `purge` defaults to dry-run and has no physical deletion side effect.
   Dry-run also appends no purge lifecycle event and does not change the ledger
   or payload objects. Execution requires explicit `--execute --yes`; a

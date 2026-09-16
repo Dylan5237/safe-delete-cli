@@ -97,8 +97,10 @@ class CliContractTests(unittest.TestCase):
 
         before = sorted(path.relative_to(self.storage).as_posix() for path in self.storage.rglob("*"))
         code, payload = run_cli(self.storage, "purge")
-        self.assertEqual(code, 2, payload)
-        self.assertEqual(payload["errors"][0]["code"], "unsupported_command")
+        self.assertEqual(code, 0, payload)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["results"][0]["dry_run"])
+        self.assertEqual(payload["results"][0]["candidates"], [])
         code, hook_payload = run_cli(self.storage, "hook", "install", "codex")
         self.assertEqual(code, 2, hook_payload)
         self.assertEqual(hook_payload["errors"][0]["code"], "unsupported_command")

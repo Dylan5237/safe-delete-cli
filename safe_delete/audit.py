@@ -6,6 +6,7 @@ import datetime as _datetime
 import json
 import os
 import re
+import stat
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -206,16 +207,18 @@ def _validate_record(record: Any, layout: Layout, line_number: int) -> dict[str,
         raise _invalid_record(line_number, "event_id is not a canonical UUID v4", entry_id=entry_hint)
     if not is_uuid4(record["entry_id"]):
         raise _invalid_record(line_number, "entry_id is not a canonical UUID v4", entry_id=entry_hint)
-    if not isinstance(record["operation"], str) or record["operation"] not in {"trash", "restore"}:
+    operations = {"trash", "restore", "purge_intent", "purge_complete", "purge_failed"}
+    if not isinstance(record["operation"], str) or record["operation"] not in operations:
         raise _invalid_record(
             line_number,
-            "operation must be trash or restore in schema 1 P2",
+            "operation is not supported in schema 1",
             entry_id=record["entry_id"],
         )
-    if not isinstance(record["state"], str) or record["state"] not in {"active", "restored"}:
+    states = {"active", "restored", "purge_pending", "purged"}
+    if not isinstance(record["state"], str) or record["state"] not in states:
         raise _invalid_record(
             line_number,
-            "state must be active or restored in schema 1 P2",
+            "state is not supported in schema 1",
             entry_id=record["entry_id"],
         )
     _validate_ledger_path(
@@ -238,14 +241,21 @@ def _validate_record(record: Any, layout: Layout, line_number: int) -> dict[str,
         raise _invalid_record(line_number, "kind is not a supported P2 kind", entry_id=record["entry_id"])
     if not _valid_timestamp(record["timestamp"]):
         raise _invalid_record(line_number, "timestamp is not UTC RFC3339 with Z", entry_id=record["entry_id"])
-    if record["operation"] == "trash":
-        if record["state"] != "active" or "restore_path" in record:
+    operation = record["operation"]
+    if operation == "trash":
+        if record["state"] != "active" or "restore_path" in record or "error_code" in record:
             raise _invalid_record(
                 line_number,
                 "trash records must be active and omit restore_path",
                 entry_id=record["entry_id"],
             )
-    else:
+    elif operation == "restore":
+        if "error_code" in record:
+            raise _invalid_record(
+                line_number,
+                "error_code is not valid on restore records",
+                entry_id=record["entry_id"],
+            )
         _validate_ledger_path(
             record.get("restore_path"),
             layout=layout,
@@ -259,12 +269,45 @@ def _validate_record(record: Any, layout: Layout, line_number: int) -> dict[str,
                 "restore records must be restored and include restore_path",
                 entry_id=record["entry_id"],
             )
-    if "error_code" in record:
-        raise _invalid_record(
-            line_number,
-            "error_code is not valid on P2 trash or restore records",
-            entry_id=record["entry_id"],
-        )
+    elif operation == "purge_intent":
+        if record["state"] != "purge_pending" or "restore_path" in record:
+            raise _invalid_record(
+                line_number,
+                "purge_intent records must be purge_pending and omit restore_path",
+                entry_id=record["entry_id"],
+            )
+        if "error_code" in record:
+            raise _invalid_record(
+                line_number,
+                "error_code is not valid on purge_intent records",
+                entry_id=record["entry_id"],
+            )
+    elif operation == "purge_complete":
+        if record["state"] != "purged" or "restore_path" in record:
+            raise _invalid_record(
+                line_number,
+                "purge_complete records must be purged and omit restore_path",
+                entry_id=record["entry_id"],
+            )
+        if "error_code" in record:
+            raise _invalid_record(
+                line_number,
+                "error_code is not valid on purge_complete records",
+                entry_id=record["entry_id"],
+            )
+    else:
+        if record["state"] != "active" or "restore_path" in record:
+            raise _invalid_record(
+                line_number,
+                "purge_failed records must be active and omit restore_path",
+                entry_id=record["entry_id"],
+            )
+        if record.get("error_code") != "purge_remove_failed":
+            raise _invalid_record(
+                line_number,
+                "purge_failed records require error_code purge_remove_failed",
+                entry_id=record["entry_id"],
+            )
     if "extensions" in record and not isinstance(record["extensions"], dict):
         raise _invalid_record(
             line_number,
@@ -382,7 +425,8 @@ def _replay(records: list[dict[str, Any]], report: AuditReport) -> None:
     for record in records:
         entry_id = record["entry_id"]
         current = report.entries.get(entry_id)
-        if record["operation"] == "trash":
+        operation = record["operation"]
+        if operation == "trash":
             if current is not None:
                 report.errors.append(
                     error(
@@ -408,17 +452,7 @@ def _replay(records: list[dict[str, Any]], report: AuditReport) -> None:
             report.errors.append(
                 error(
                     "impossible_transition",
-                    "restore event has no preceding trash event",
-                    entry_id=entry_id,
-                )
-            )
-            report.tainted_entry_ids.add(entry_id)
-            continue
-        if current.state != "active":
-            report.errors.append(
-                error(
-                    "impossible_transition",
-                    "restore event does not follow an active entry",
+                    f"{operation} event has no preceding trash event",
                     entry_id=entry_id,
                 )
             )
@@ -462,8 +496,40 @@ def _replay(records: list[dict[str, Any]], report: AuditReport) -> None:
             )
             report.tainted_entry_ids.add(entry_id)
             continue
+
+        expected_state: str | None = None
+        valid_transition = False
+        if operation == "restore":
+            valid_transition = current.state == "active"
+            expected_state = "restored"
+        elif operation == "purge_intent":
+            valid_transition = current.state == "active"
+            expected_state = "purge_pending"
+        elif operation == "purge_complete":
+            valid_transition = (
+                current.state == "purge_pending"
+                and current.events[-1]["operation"] == "purge_intent"
+            )
+            expected_state = "purged"
+        elif operation == "purge_failed":
+            valid_transition = (
+                current.state == "purge_pending"
+                and current.events[-1]["operation"] == "purge_intent"
+            )
+            expected_state = "active"
+
+        if not valid_transition or record["state"] != expected_state:
+            report.errors.append(
+                error(
+                    "impossible_transition",
+                    f"{operation} event does not follow the lifecycle state machine",
+                    entry_id=entry_id,
+                )
+            )
+            report.tainted_entry_ids.add(entry_id)
+            continue
         current.events.append(record)
-        current.state = "restored"
+        current.state = expected_state
 
 
 def _reconcile_objects(layout: Layout, report: AuditReport) -> None:
@@ -495,7 +561,7 @@ def _reconcile_objects(layout: Layout, report: AuditReport) -> None:
                 )
             )
             continue
-        if not os.path.isdir(child_path) or os.path.islink(child_path):
+        if not stat.S_ISDIR(child_stat.st_mode) or stat.S_ISLNK(child_stat.st_mode):
             report.errors.append(
                 error(
                     "orphan_payload",
@@ -504,6 +570,33 @@ def _reconcile_objects(layout: Layout, report: AuditReport) -> None:
                     trashed_path=str(child_path / "payload"),
                 )
             )
+            continue
+        try:
+            with os.scandir(child_path) as children_in_object:
+                child_names = [item.name for item in children_in_object]
+        except OSError as exc:
+            report.errors.append(
+                error(
+                    "storage_failure",
+                    f"cannot inspect trash object layout: {child_path}",
+                    entry_id=child.name,
+                    path=str(child_path),
+                    errno=exc.errno,
+                )
+            )
+            if child.name in report.entries:
+                report.tainted_entry_ids.add(child.name)
+            continue
+        if child.name in report.entries and any(name != "payload" for name in child_names):
+            report.errors.append(
+                error(
+                    "storage_failure",
+                    "trash object contains an unexpected sibling",
+                    entry_id=child.name,
+                    trashed_path=str(child_path),
+                )
+            )
+            report.tainted_entry_ids.add(child.name)
             continue
         payload = child_path / "payload"
         try:
@@ -530,7 +623,7 @@ def _reconcile_objects(layout: Layout, report: AuditReport) -> None:
             report.errors.append(exc)
             report.tainted_entry_ids.add(entry.entry_id)
             continue
-        if entry.state == "active" and actual_kind != entry.kind:
+        if entry.state in {"active", "purge_pending"} and actual_kind != entry.kind:
             report.errors.append(
                 error(
                     "storage_failure",
@@ -540,11 +633,11 @@ def _reconcile_objects(layout: Layout, report: AuditReport) -> None:
                 )
             )
             report.tainted_entry_ids.add(entry.entry_id)
-        elif entry.state == "restored":
+        elif entry.state in {"restored", "purged"}:
             report.errors.append(
                 error(
                     "storage_failure",
-                    "restored entry still has a trash payload",
+                    f"{entry.state} entry still has a trash payload",
                     entry_id=entry.entry_id,
                     trashed_path=str(payload),
                 )
@@ -552,11 +645,19 @@ def _reconcile_objects(layout: Layout, report: AuditReport) -> None:
             report.tainted_entry_ids.add(entry.entry_id)
 
     for entry_id, entry in report.entries.items():
-        if entry.state == "active" and not has_entry(layout.payload(entry_id)):
+        if entry.state not in {"active", "purge_pending"}:
+            continue
+        try:
+            payload_exists = has_entry(layout.payload(entry_id))
+        except SafeDeleteError as exc:
+            report.errors.append(exc)
+            report.tainted_entry_ids.add(entry_id)
+            continue
+        if not payload_exists:
             report.errors.append(
                 error(
                     "payload_missing",
-                    "active ledger entry has no payload",
+                    f"{entry.state} ledger entry has no payload",
                     entry_id=entry_id,
                     trashed_path=str(layout.payload(entry_id)),
                 )
