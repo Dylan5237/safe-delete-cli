@@ -64,6 +64,36 @@ def _renameat2_noreplace(
     raise OSError(saved_errno, os.strerror(saved_errno), source_name)
 
 
+def rename_without_replace(
+    source_parent_fd: int,
+    source_name: str,
+    destination_parent_fd: int,
+    destination_name: str,
+) -> None:
+    """Atomically move one name with no-replace semantics or fail closed.
+
+    ``OSError`` from the rename propagates with its original ``errno`` (for
+    example ``EEXIST`` when the destination name is occupied or ``EXDEV``
+    across filesystems).  When the platform lacks the no-replace primitive the
+    caller must fail closed, so this raises ``storage_failure`` instead of
+    falling back to a replace-prone rename.
+    """
+
+    result = _renameat2_noreplace(
+        source_parent_fd,
+        source_name,
+        destination_parent_fd,
+        destination_name,
+    )
+    if result is _NO_REPLACE_UNAVAILABLE:
+        raise error(
+            "storage_failure",
+            "safe no-replace rename primitive is unavailable",
+            source=source_name,
+            destination=destination_name,
+        )
+
+
 def _lstat_at(parent_fd: int, name: str) -> os.stat_result | None:
     try:
         return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
