@@ -7,6 +7,7 @@ import json
 import os
 import stat
 import uuid
+from typing import Any
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -134,6 +135,94 @@ def metadata_for_record(record: dict[str, object]) -> RichMetadata:
     """Validate and copy rich metadata from an existing creation event."""
 
     return metadata_from_record(record)
+
+
+_LIFECYCLE_METADATA = (
+    "project",
+    "session_id",
+    "reason",
+    "agent",
+    "tool",
+    "extensions",
+)
+
+
+def _copy_creation_metadata(record: dict[str, Any], creation: dict[str, Any]) -> None:
+    """Copy only declared rich metadata, preserving P2 omissions exactly."""
+
+    for field_name in _LIFECYCLE_METADATA:
+        if field_name in creation:
+            record[field_name] = creation[field_name]
+
+
+def _build_purge_record(
+    *,
+    entry: Any,
+    operation: str,
+    state: str,
+    timestamp: str | None = None,
+    error_code: str | None = None,
+) -> dict[str, object]:
+    record: dict[str, object] = {
+        "schema_version": 1,
+        "event_id": str(uuid.uuid4()),
+        "entry_id": entry.entry_id,
+        "operation": operation,
+        "state": state,
+        "original_path": entry.original_path,
+        "trashed_path": entry.trashed_path,
+        "kind": entry.kind,
+        "timestamp": timestamp or utc_timestamp(),
+    }
+    creation = getattr(entry, "creation", None)
+    if isinstance(creation, dict):
+        _copy_creation_metadata(record, creation)
+    if error_code is not None:
+        record["error_code"] = error_code
+    return record
+
+
+def build_purge_intent_record(
+    entry: Any,
+    *,
+    timestamp: str | None = None,
+) -> dict[str, object]:
+    """Build the durable event that authorizes one physical purge attempt."""
+
+    return _build_purge_record(
+        entry=entry,
+        operation="purge_intent",
+        state="purge_pending",
+        timestamp=timestamp,
+    )
+
+
+def build_purge_complete_record(
+    entry: Any,
+    *,
+    timestamp: str | None = None,
+) -> dict[str, object]:
+    return _build_purge_record(
+        entry=entry,
+        operation="purge_complete",
+        state="purged",
+        timestamp=timestamp,
+    )
+
+
+def build_purge_failed_record(
+    entry: Any,
+    *,
+    timestamp: str | None = None,
+    error_code: str = "purge_remove_failed",
+) -> dict[str, object]:
+    return _build_purge_record(
+        entry=entry,
+        operation="purge_failed",
+        state="active",
+        timestamp=timestamp,
+        error_code=error_code,
+    )
 
 
 def _ledger_failure(message: str, path: Path, exc: OSError | None = None) -> SafeDeleteError:

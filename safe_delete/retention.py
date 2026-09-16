@@ -26,7 +26,7 @@ from .errors import SafeDeleteError, error
 DEFAULT_RETENTION_DAYS = 30
 _SECONDS_PER_DAY = 24 * 60 * 60
 _DECIMAL_INTEGER = re.compile(r"^[0-9]+$")
-_OLDER_THAN = re.compile(r"^([1-9][0-9]*)([dh])$")
+_OLDER_THAN = re.compile(r"^([0-9]+)([dh])$")
 _RFC3339_WITH_ZONE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
 )
@@ -87,6 +87,11 @@ def parse_older_than(value: str) -> tuple[_datetime.timedelta, str, int | float]
         amount = int(amount_text, 10)
     except (TypeError, ValueError, OverflowError) as exc:
         raise _usage("--older-than is outside the supported range", value=value) from exc
+    if amount <= 0:
+        raise _usage(
+            "--older-than must be a positive integer followed by d or h",
+            value=value,
+        )
     try:
         duration = (
             _datetime.timedelta(days=amount)
@@ -312,4 +317,3 @@ def evaluate_entry(
     if state == "purged":
         return Eligibility(False, "already_purged", anchor)
     return Eligibility(False, "unknown_state")
-
