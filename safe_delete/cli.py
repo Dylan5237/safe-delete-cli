@@ -1,0 +1,269 @@
+"""Command dispatch and the P2-S0 machine-readable CLI surface."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from typing import Any, Callable
+
+from . import CONTRACT_VERSION, SCHEMA_VERSION, __version__
+from .audit import AuditReport, LedgerEntry, audit_layout, is_uuid4
+from .errors import (
+    EXIT_SUCCESS,
+    SafeDeleteError,
+    error,
+    exit_code_for,
+)
+from .storage import Layout, normalized_path, initialize_layout, ledger_lock, require_layout
+
+
+def _common_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, metavar="DIR")
+    parser.add_argument("--json", dest="json", action="store_true", default=argparse.SUPPRESS)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="safe-delete")
+    parser.set_defaults(root=None, json=False)
+    _common_options(parser)
+    commands = parser.add_subparsers(dest="command")
+
+    init_parser = commands.add_parser("init")
+    _common_options(init_parser)
+
+    add_parser = commands.add_parser("add")
+    _common_options(add_parser)
+    add_parser.add_argument("paths", nargs="+")
+    add_parser.add_argument("--reason")
+    add_parser.add_argument("--project")
+    add_parser.add_argument("--session-id")
+    add_parser.add_argument("--agent")
+    add_parser.add_argument("--tool")
+    add_parser.add_argument("--dry-run", action="store_true")
+
+    list_parser = commands.add_parser("list")
+    _common_options(list_parser)
+    list_parser.add_argument("--all", action="store_true")
+    list_parser.add_argument("--orphans", action="store_true")
+    list_parser.add_argument("--project")
+    list_parser.add_argument("--original")
+
+    show_parser = commands.add_parser("show")
+    _common_options(show_parser)
+    show_parser.add_argument("entry_id")
+
+    restore_parser = commands.add_parser("restore")
+    _common_options(restore_parser)
+    restore_parser.add_argument("entry_id")
+    restore_parser.add_argument("--to", dest="restore_to")
+    restore_parser.add_argument("--create-parents", action="store_true")
+
+    purge_parser = commands.add_parser("purge")
+    _common_options(purge_parser)
+    purge_parser.add_argument("--dry-run", action="store_true")
+    purge_parser.add_argument("--execute", action="store_true")
+    purge_parser.add_argument("--yes", action="store_true")
+    purge_parser.add_argument("--older-than")
+    purge_parser.add_argument("--before")
+
+    hook_parser = commands.add_parser("hook")
+    _common_options(hook_parser)
+    hook_commands = hook_parser.add_subparsers(dest="hook_command")
+    install_parser = hook_commands.add_parser("install")
+    _common_options(install_parser)
+    install_parser.add_argument("agent", nargs="?")
+
+    version_parser = commands.add_parser("version")
+    _common_options(version_parser)
+    return parser
+
+
+def _envelope(command: str, results: list[Any], errors: list[SafeDeleteError]) -> dict[str, Any]:
+    return {
+        "command": command,
+        "ok": not errors,
+        "results": results,
+        "errors": [item.as_dict() for item in errors],
+    }
+
+
+def _print_human(envelope: dict[str, Any]) -> None:
+    for result in envelope["results"]:
+        if isinstance(result, str):
+            print(result)
+        else:
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    for item in envelope["errors"]:
+        print(
+            f"safe-delete: {item['code']}: {item['message']}",
+            file=sys.stderr,
+        )
+
+
+def _emit(command: str, results: list[Any], errors: list[SafeDeleteError], json_mode: bool) -> int:
+    envelope = _envelope(command, results, errors)
+    if json_mode:
+        print(json.dumps(envelope, ensure_ascii=False, separators=(",", ":")))
+    else:
+        _print_human(envelope)
+    return exit_code_for(errors)
+
+
+def _entry_result(entry: LedgerEntry) -> dict[str, Any]:
+    return {
+        "entry_id": entry.entry_id,
+        "state": entry.state,
+        "original_path": entry.original_path,
+        "trashed_path": entry.trashed_path,
+        "kind": entry.kind,
+        "timestamp": entry.creation["timestamp"],
+    }
+
+
+def _audit_errors_for_list(report: AuditReport) -> list[SafeDeleteError]:
+    return list(report.errors)
+
+
+def _handle_init(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
+    layout = initialize_layout(args.root)
+    return [
+        {
+            "root": str(layout.root),
+            "ledger_path": str(layout.ledger),
+            "lock_path": str(layout.lock),
+            "trash_path": str(layout.trash),
+            "objects_path": str(layout.objects),
+        }
+    ], []
+
+
+def _handle_list(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
+    layout = require_layout(args.root)
+    project_filter = normalized_path(args.project, field_name="project") if args.project else None
+    original_filter = normalized_path(args.original, field_name="original") if args.original else None
+    with ledger_lock(layout, exclusive=False):
+        report = audit_layout(layout)
+    results: list[Any] = []
+    if not args.orphans:
+        for entry in sorted(report.entries.values(), key=lambda item: item.entry_id):
+            if not args.all and entry.state != "active":
+                continue
+            if project_filter is not None and entry.creation.get("project") != project_filter:
+                continue
+            if original_filter is not None and entry.original_path != original_filter:
+                continue
+            results.append(_entry_result(entry))
+    return results, _audit_errors_for_list(report)
+
+
+def _handle_show(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
+    if not is_uuid4(args.entry_id):
+        return [], [error("usage_error", "entry_id must be a canonical UUID v4", entry_id=args.entry_id)]
+    layout = require_layout(args.root)
+    with ledger_lock(layout, exclusive=False):
+        report = audit_layout(layout)
+    entry = report.entries.get(args.entry_id)
+    relevant_errors = report.errors_for(args.entry_id)
+    if relevant_errors:
+        return [], relevant_errors
+    if entry is None:
+        return [], [error("entry_not_found", "entry was not found", entry_id=args.entry_id)]
+    return [
+        {
+            "entry_id": entry.entry_id,
+            "state": entry.state,
+            "creation": entry.creation,
+            "events": entry.events,
+        }
+    ], []
+
+
+def _handle_reserved(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
+    command = "hook install" if args.command == "hook" else args.command
+    return [], [
+        error(
+            "unsupported_command",
+            f"{command} is reserved for a later phase",
+            command=command,
+        )
+    ]
+
+
+def _handle_not_yet_implemented(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
+    # The move, writer, and restore slices replace these handlers in their
+    # respective atomic commits. Keeping dispatch explicit makes the staged
+    # P2 history reviewable and avoids pretending unsupported product behavior
+    # is complete in P2-S0.
+    return [], [error("usage_error", f"{args.command} is not available in this slice")]
+
+
+def _command_name(args: argparse.Namespace) -> str:
+    if args.command == "hook" and getattr(args, "hook_command", None):
+        return f"hook {args.hook_command}"
+    return args.command or "safe-delete"
+
+
+def _dispatch(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
+    if args.command == "init":
+        return _handle_init(args)
+    if args.command == "list":
+        return _handle_list(args)
+    if args.command == "show":
+        return _handle_show(args)
+    if args.command == "version":
+        return [
+            {
+                "version": __version__,
+                "contract_version": CONTRACT_VERSION,
+                "schema_version": SCHEMA_VERSION,
+            }
+        ], []
+    if args.command in {"purge"} or (
+        args.command == "hook" and getattr(args, "hook_command", None) == "install"
+    ):
+        return _handle_reserved(args)
+    if args.command in {"add", "restore"}:
+        return _handle_not_yet_implemented(args)
+    return [], [error("usage_error", "a command is required")]
+
+
+def _parse_error_command(raw_args: list[str]) -> str:
+    for index, value in enumerate(raw_args):
+        if value == "hook" and index + 1 < len(raw_args) and raw_args[index + 1] == "install":
+            return "hook install"
+        if value in {"init", "add", "list", "show", "restore", "purge", "version"}:
+            return value
+    return "safe-delete"
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    parser = build_parser()
+    json_requested = "--json" in raw_args
+    command_hint = _parse_error_command(raw_args)
+    try:
+        args = parser.parse_args(raw_args)
+    except SystemExit as exc:
+        if exc.code and json_requested:
+            return _emit(
+                command_hint,
+                [],
+                [error("usage_error", "invalid command-line arguments")],
+                True,
+            )
+        return int(exc.code or EXIT_SUCCESS)
+
+    command = _command_name(args)
+    try:
+        results, errors = _dispatch(args)
+    except SafeDeleteError as exc:
+        results, errors = [], [exc]
+    except (OSError, ValueError) as exc:
+        results, errors = [], [error("storage_failure", str(exc))]
+    return _emit(command, results, errors, bool(args.json))
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
+
