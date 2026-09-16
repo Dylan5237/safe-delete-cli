@@ -11,13 +11,32 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .errors import SafeDeleteError, error
-from .storage import Layout, has_entry, kind_for
+from .storage import Layout, ensure_safe_target, has_entry, kind_for, normalized_path
 
 
 _RFC3339_Z = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"
 )
 _KINDS = {"file", "directory", "symlink"}
+_DECLARED_FIELDS = {
+    "schema_version",
+    "event_id",
+    "entry_id",
+    "operation",
+    "state",
+    "original_path",
+    "trashed_path",
+    "kind",
+    "timestamp",
+    "restore_path",
+    "project",
+    "session_id",
+    "reason",
+    "agent",
+    "tool",
+    "extensions",
+    "error_code",
+}
 
 
 @dataclass
@@ -70,6 +89,35 @@ def _valid_path(value: Any) -> bool:
     return os.path.isabs(value) and os.path.normpath(value) == value
 
 
+def _validate_ledger_path(
+    value: Any,
+    *,
+    layout: Layout,
+    field_name: str,
+    line_number: int,
+    entry_id: str,
+) -> None:
+    if not _valid_path(value):
+        raise _invalid_record(
+            line_number,
+            f"{field_name} is not absolute and normalized",
+            entry_id=entry_id,
+        )
+    try:
+        # The same lexical storage-target policy applies to historical paths
+        # as to live CLI inputs.  Requiring the current canonical parent also
+        # prevents a ledger path from becoming unsafe through a parent link.
+        if normalized_path(value, field_name=field_name) != value:
+            raise ValueError("parent symlink is not canonical")
+        ensure_safe_target(layout, value)
+    except (SafeDeleteError, ValueError) as exc:
+        raise _invalid_record(
+            line_number,
+            f"{field_name} fails safe path validation",
+            entry_id=entry_id,
+        ) from exc
+
+
 def _valid_timestamp(value: Any) -> bool:
     if not isinstance(value, str) or not _RFC3339_Z.fullmatch(value):
         return False
@@ -107,6 +155,14 @@ def _validate_record(record: Any, layout: Layout, line_number: int) -> dict[str,
     if not isinstance(record, dict):
         raise _invalid_record(line_number, "ledger line must be a JSON object")
 
+    unknown = sorted(set(record) - _DECLARED_FIELDS)
+    if unknown:
+        raise _invalid_record(
+            line_number,
+            f"ledger record contains undeclared field(s): {', '.join(unknown)}",
+            entry_id=entry_hint,
+        )
+
     required = (
         "schema_version",
         "event_id",
@@ -143,20 +199,25 @@ def _validate_record(record: Any, layout: Layout, line_number: int) -> dict[str,
         raise _invalid_record(line_number, "event_id is not a canonical UUID v4", entry_id=entry_hint)
     if not is_uuid4(record["entry_id"]):
         raise _invalid_record(line_number, "entry_id is not a canonical UUID v4", entry_id=entry_hint)
-    if record["operation"] not in {"trash", "restore"}:
+    if not isinstance(record["operation"], str) or record["operation"] not in {"trash", "restore"}:
         raise _invalid_record(
             line_number,
             "operation must be trash or restore in schema 1 P2",
             entry_id=record["entry_id"],
         )
-    if record["state"] not in {"active", "restored"}:
+    if not isinstance(record["state"], str) or record["state"] not in {"active", "restored"}:
         raise _invalid_record(
             line_number,
             "state must be active or restored in schema 1 P2",
             entry_id=record["entry_id"],
         )
-    if not _valid_path(record["original_path"]):
-        raise _invalid_record(line_number, "original_path is not absolute and normalized", entry_id=record["entry_id"])
+    _validate_ledger_path(
+        record["original_path"],
+        layout=layout,
+        field_name="original_path",
+        line_number=line_number,
+        entry_id=record["entry_id"],
+    )
     if not _valid_path(record["trashed_path"]):
         raise _invalid_record(line_number, "trashed_path is not absolute and normalized", entry_id=record["entry_id"])
     expected_payload = os.fspath(layout.payload(record["entry_id"]))
@@ -166,7 +227,7 @@ def _validate_record(record: Any, layout: Layout, line_number: int) -> dict[str,
             "trashed_path does not match the entry object path",
             entry_id=record["entry_id"],
         )
-    if record["kind"] not in _KINDS:
+    if not isinstance(record["kind"], str) or record["kind"] not in _KINDS:
         raise _invalid_record(line_number, "kind is not a supported P2 kind", entry_id=record["entry_id"])
     if not _valid_timestamp(record["timestamp"]):
         raise _invalid_record(line_number, "timestamp is not UTC RFC3339 with Z", entry_id=record["entry_id"])
@@ -178,7 +239,14 @@ def _validate_record(record: Any, layout: Layout, line_number: int) -> dict[str,
                 entry_id=record["entry_id"],
             )
     else:
-        if record["state"] != "restored" or not _valid_path(record.get("restore_path")):
+        _validate_ledger_path(
+            record.get("restore_path"),
+            layout=layout,
+            field_name="restore_path",
+            line_number=line_number,
+            entry_id=record["entry_id"],
+        )
+        if record["state"] != "restored":
             raise _invalid_record(
                 line_number,
                 "restore records must be restored and include restore_path",
@@ -188,6 +256,19 @@ def _validate_record(record: Any, layout: Layout, line_number: int) -> dict[str,
         raise _invalid_record(
             line_number,
             "extensions must be an object when present",
+            entry_id=record["entry_id"],
+        )
+    for field_name in ("project", "session_id", "reason", "agent", "tool"):
+        if field_name in record and record[field_name] is not None and not isinstance(record[field_name], str):
+            raise _invalid_record(
+                line_number,
+                f"{field_name} must be a string or null",
+                entry_id=record["entry_id"],
+            )
+    if "error_code" in record and not isinstance(record["error_code"], str):
+        raise _invalid_record(
+            line_number,
+            "error_code must be a string",
             entry_id=record["entry_id"],
         )
     return record

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -17,7 +18,12 @@ _RENAME_NOREPLACE = 1
 _NO_REPLACE_UNAVAILABLE = object()
 
 
-def _renameat2_noreplace(source: Path, destination: Path) -> bool | object:
+def _renameat2_noreplace(
+    source_parent_fd: int,
+    source_name: str,
+    destination_parent_fd: int,
+    destination_name: str,
+) -> bool | object:
     """Use Linux's atomic no-replace rename when libc exposes it.
 
     ``False`` means the host has no usable primitive and the caller may use the
@@ -41,10 +47,10 @@ def _renameat2_noreplace(source: Path, destination: Path) -> bool | object:
     ]
     renameat2.restype = ctypes.c_int
     result = renameat2(
-        _AT_FDCWD,
-        os.fsencode(source),
-        _AT_FDCWD,
-        os.fsencode(destination),
+        source_parent_fd,
+        os.fsencode(source_name),
+        destination_parent_fd,
+        os.fsencode(destination_name),
         _RENAME_NOREPLACE,
     )
     if result == 0:
@@ -52,22 +58,40 @@ def _renameat2_noreplace(source: Path, destination: Path) -> bool | object:
     saved_errno = ctypes.get_errno()
     if saved_errno in {errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOTSUP}:
         return _NO_REPLACE_UNAVAILABLE
-    raise OSError(saved_errno, os.strerror(saved_errno), os.fspath(source))
+    raise OSError(saved_errno, os.strerror(saved_errno), source_name)
 
 
-def _lstat_destination(destination: Path) -> bool:
+def _open_directory_without_symlinks(path: Path) -> int:
+    """Open every component with O_NOFOLLOW and retain the final directory fd."""
+
+    normalized = os.path.normpath(os.fspath(path))
+    if not os.path.isabs(normalized):
+        raise error("storage_failure", f"move path must be absolute: {path}", path=str(path))
+    fd = os.open(os.sep, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
-        os.lstat(destination)
+        for component in Path(normalized).parts[1:]:
+            next_fd = os.open(
+                component,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=fd,
+            )
+            os.close(fd)
+            fd = next_fd
+        return fd
+    except OSError:
+        os.close(fd)
+        raise
+
+
+def _lstat_at(parent_fd: int, name: str) -> os.stat_result | None:
+    try:
+        return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError:
-        return False
+        return None
     except OSError as exc:
-        raise error(
-            "storage_failure",
-            f"cannot inspect move destination: {destination}",
-            path=str(destination),
-            errno=exc.errno,
-        ) from exc
-    return True
+        raise exc
 
 
 def atomic_move(
@@ -87,67 +111,76 @@ def atomic_move(
 
     source_path = Path(source)
     destination_path = Path(destination)
+    source_parent_fd = destination_parent_fd = None
     try:
-        source_stat = os.lstat(source_path)
-    except FileNotFoundError as exc:
-        raise error(
-            "source_not_found",
-            f"source does not exist: {source_path}",
-            path=str(source_path),
-        ) from exc
-    except OSError as exc:
-        raise error(
-            "storage_failure",
-            f"cannot inspect move source: {source_path}",
-            path=str(source_path),
-            errno=exc.errno,
-        ) from exc
+        source_parent_fd = _open_directory_without_symlinks(source_path.parent)
+        destination_parent_fd = _open_directory_without_symlinks(destination_path.parent)
+        source_stat = _lstat_at(source_parent_fd, source_path.name)
+        if source_stat is None:
+            raise error(
+                "source_not_found",
+                f"source does not exist: {source_path}",
+                path=str(source_path),
+            )
+        destination_stat = _lstat_at(destination_parent_fd, destination_path.name)
+        if destination_stat is not None:
+            raise error(
+                destination_error_code,
+                f"move destination already exists: {destination_path}",
+                path=str(destination_path),
+            )
 
-    if _lstat_destination(destination_path):
-        raise error(
-            destination_error_code,
-            f"move destination already exists: {destination_path}",
-            path=str(destination_path),
+        parent_stat = os.fstat(destination_parent_fd)
+        if source_stat.st_dev != parent_stat.st_dev:
+            raise error(
+                "cross_device",
+                "source and destination are on different filesystems",
+                source=str(source_path),
+                destination=str(destination_path),
+            )
+
+        result = _renameat2_noreplace(
+            source_parent_fd,
+            source_path.name,
+            destination_parent_fd,
+            destination_path.name,
         )
-
-    parent = destination_path.parent
-    try:
-        parent_stat = os.stat(parent)
-    except FileNotFoundError as exc:
-        raise error(
-            "storage_failure",
-            f"move destination parent is missing: {parent}",
-            path=str(parent),
-        ) from exc
-    except OSError as exc:
-        raise error(
-            "storage_failure",
-            f"cannot inspect move destination parent: {parent}",
-            path=str(parent),
-            errno=exc.errno,
-        ) from exc
-
-    if source_stat.st_dev != parent_stat.st_dev:
-        raise error(
-            "cross_device",
-            "source and destination are on different filesystems",
-            source=str(source_path),
-            destination=str(destination_path),
-        )
-
-    try:
-        result = _renameat2_noreplace(source_path, destination_path)
         if result is _NO_REPLACE_UNAVAILABLE:
-            # The destination check is deliberately immediately adjacent to
-            # rename. On hosts without renameat2 this is the documented small
-            # residual race; no overwrite flag or copy fallback is used.
-            if _lstat_destination(destination_path):
+            # There is no portable no-replace directory move primitive.  For
+            # regular files and symlinks, link+unlink gives an atomic,
+            # no-overwrite destination claim.  Refuse directories rather than
+            # falling back to overwrite-capable os.rename.
+            if stat.S_ISDIR(source_stat.st_mode):
                 raise error(
-                    destination_error_code,
-                    f"move destination already exists: {destination_path}",
-                    path=str(destination_path),
+                    "storage_failure",
+                    "no safe no-replace move primitive is available for directories",
+                    source=str(source_path),
+                    destination=str(destination_path),
                 )
-            os.rename(source_path, destination_path)
+            try:
+                os.link(
+                    source_path.name,
+                    destination_path.name,
+                    src_dir_fd=source_parent_fd,
+                    dst_dir_fd=destination_parent_fd,
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                if exc.errno == errno.EEXIST:
+                    raise error(
+                        destination_error_code,
+                        f"move destination already exists: {destination_path}",
+                        path=str(destination_path),
+                    ) from exc
+                raise
+            try:
+                os.unlink(source_path.name, dir_fd=source_parent_fd)
+            except OSError:
+                try:
+                    os.unlink(destination_path.name, dir_fd=destination_parent_fd)
+                except OSError:
+                    pass
+                raise
     except SafeDeleteError:
         raise
     except OSError as exc:
@@ -165,14 +198,11 @@ def atomic_move(
                 path=str(destination_path),
             ) from exc
         if exc.errno == errno.ENOENT:
-            try:
-                os.lstat(source_path)
-            except FileNotFoundError:
-                raise error(
-                    "source_not_found",
-                    f"source does not exist: {source_path}",
-                    path=str(source_path),
-                ) from exc
+            raise error(
+                "source_not_found",
+                f"source or move parent does not exist: {source_path}",
+                path=str(source_path),
+            ) from exc
         raise error(
             "storage_failure",
             f"atomic move failed: {source_path} -> {destination_path}",
@@ -180,3 +210,8 @@ def atomic_move(
             destination=str(destination_path),
             errno=exc.errno,
         ) from exc
+    finally:
+        if source_parent_fd is not None:
+            os.close(source_parent_fd)
+        if destination_parent_fd is not None:
+            os.close(destination_parent_fd)

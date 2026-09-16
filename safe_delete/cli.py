@@ -116,6 +116,16 @@ def _print_human(envelope: dict[str, Any]) -> None:
             f"safe-delete: {item['code']}: {item['message']}",
             file=sys.stderr,
         )
+        if item["code"] in {"rollback_failed", "orphan_payload"}:
+            source = (
+                item.get("source")
+                or item.get("restore_path")
+                or item.get("original_path")
+                or "<not recorded>"
+            )
+            trash = item.get("trashed_path") or item.get("trash_path") or "<not recorded>"
+            print(f"  source path: {source}", file=sys.stderr)
+            print(f"  trash path: {trash}", file=sys.stderr)
 
 
 def _emit(command: str, results: list[Any], errors: list[SafeDeleteError], json_mode: bool) -> int:
@@ -171,7 +181,10 @@ def _handle_list(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteEr
             if original_filter is not None and entry.original_path != original_filter:
                 continue
             results.append(_entry_result(entry))
-    return results, _audit_errors_for_list(report)
+    audit_errors = _audit_errors_for_list(report)
+    if args.orphans:
+        audit_errors = [item for item in audit_errors if item.code == "orphan_payload"]
+    return results, audit_errors
 
 
 def _handle_show(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
@@ -254,6 +267,14 @@ def _rollback_trash_move(
     )
 
 
+def _failed_input_result(path: str, exc: SafeDeleteError) -> dict[str, Any]:
+    return {
+        "path": path,
+        "ok": False,
+        "error": exc.as_dict(),
+    }
+
+
 def _handle_add(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
     layout = initialize_layout(args.root)
     results: list[Any] = []
@@ -261,8 +282,15 @@ def _handle_add(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteErr
     with ledger_lock(layout, exclusive=True):
         audit = audit_layout(layout)
         if audit.errors:
-            return [], list(audit.errors)
+            errors = list(audit.errors)
+            if args.paths:
+                representative = errors[0]
+                return [
+                    _failed_input_result(raw_path, representative)
+                    for raw_path in args.paths
+                ], errors
 
+        failed_inputs = 0
         for raw_path in args.paths:
             try:
                 original_path = normalized_path(raw_path)
@@ -294,13 +322,12 @@ def _handle_add(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteErr
                         payload_path,
                         destination_error_code="entry_id_collision",
                     )
-                except SafeDeleteError:
+                except SafeDeleteError as move_error:
                     try:
                         remove_empty_object_directory(object_directory)
                     except SafeDeleteError as cleanup_error:
-                        errors.append(cleanup_error)
-                        continue
-                    raise
+                        raise cleanup_error from move_error
+                    raise move_error
 
                 record = build_trash_record(
                     entry_id=entry_id,
@@ -311,14 +338,15 @@ def _handle_add(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteErr
                 try:
                     append_event(layout, record)
                 except SafeDeleteError as append_error:
-                    errors.append(
-                        _rollback_trash_move(
-                            source_path=original_path,
-                            payload_path=str(payload_path),
-                            object_directory=object_directory,
-                            append_error=append_error,
-                        )
+                    rollback_error = _rollback_trash_move(
+                        source_path=original_path,
+                        payload_path=str(payload_path),
+                        object_directory=object_directory,
+                        append_error=append_error,
                     )
+                    errors.append(rollback_error)
+                    results.append(_failed_input_result(raw_path, rollback_error))
+                    failed_inputs += 1
                     continue
                 results.append(
                     {
@@ -331,15 +359,18 @@ def _handle_add(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteErr
                     }
                 )
             except SafeDeleteError as exc:
-                errors.append(_with_path(exc, raw_path))
+                exc = _with_path(exc, raw_path)
+                errors.append(exc)
+                results.append(_failed_input_result(raw_path, exc))
+                failed_inputs += 1
 
-    if results and errors:
+    if results and failed_inputs and failed_inputs < len(args.paths):
         errors.append(
             error(
                 "partial_failure",
                 "one or more add inputs failed after independent processing",
                 succeeded=len(results),
-                failed=len(errors),
+                failed=failed_inputs,
             )
         )
     return results, errors
@@ -443,7 +474,7 @@ def main(argv: list[str] | None = None) -> int:
         results, errors = _dispatch(args)
     except SafeDeleteError as exc:
         results, errors = [], [exc]
-    except (OSError, ValueError) as exc:
+    except (OSError, TypeError, ValueError) as exc:
         results, errors = [], [error("storage_failure", str(exc))]
     return _emit(command, results, errors, bool(args.json))
 

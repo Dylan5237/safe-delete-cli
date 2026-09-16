@@ -284,6 +284,8 @@ def normalized_path(value: str | os.PathLike[str] | bytes, *, field_name: str = 
     """Return an absolute path with parent symlinks resolved, not its final name."""
 
     raw = _text(value, field_name=field_name)
+    if not raw:
+        raise error("usage_error", f"{field_name} must not be empty")
     absolute = os.path.normpath(os.path.abspath(raw))
     parent, basename = os.path.split(absolute)
     resolved_parent = os.path.realpath(parent)

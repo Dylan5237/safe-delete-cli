@@ -164,11 +164,26 @@ def append_event(layout: Layout, record: dict[str, object]) -> None:
         raise _ledger_failure("cannot encode ledger event as UTF-8 JSON", layout.ledger) from exc
 
     try:
-        fd = os.open(layout.ledger, os.O_WRONLY | os.O_APPEND)
+        fd = os.open(layout.ledger, os.O_RDWR | os.O_APPEND)
     except OSError as exc:
         raise _ledger_failure(f"cannot open ledger for append: {layout.ledger}", layout.ledger, exc) from exc
 
     try:
+        # A hand-written or interrupted JSONL line may be valid JSON but lack
+        # its final delimiter.  Add the separator as part of this append so
+        # the new event can never be glued to the preceding object.
+        try:
+            end = os.lseek(fd, 0, os.SEEK_END)
+            separator = b""
+            if end:
+                previous = os.pread(fd, 1, end - 1)
+                if previous != b"\n":
+                    separator = b"\n"
+        except OSError as exc:
+            raise _ledger_failure(
+                f"cannot inspect ledger boundary: {layout.ledger}", layout.ledger, exc
+            ) from exc
+        encoded = separator + encoded
         offset = 0
         while offset < len(encoded):
             try:
@@ -202,4 +217,3 @@ def remove_empty_object_directory(object_directory: Path) -> None:
             path=str(object_directory),
             errno=exc.errno,
         ) from exc
-
