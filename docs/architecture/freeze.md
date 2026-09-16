@@ -878,6 +878,164 @@ Exception #12 remains a P2-only accepted carve-out: P5 does not expand restore
 staging isolation claims, reopen same-UID staging mutation, or represent that
 residual publication-identity risk as fixed.
 
+### P6 Contract Freeze status (Issue #8)
+
+**Status:** `freeze:pending` — this is a Phase 6 evidence-contract proposal
+only. It does not claim `FREEZE ACK`, `EVIDENCE READY`, `PHASE ACCEPT`, or a
+Phase PASS, and it does not authorize product, feature, fix, harness, or
+evidence capture work in this docs review. The proposal is tracked on [Issue
+#8](https://github.com/Dylan5237/safe-delete-cli/issues/8); only the named
+disposer may decide the freeze or accept the phase.
+
+This refinement is subordinate to the architecture already frozen on `main` at
+`fda2c77`: the [P2–P6 later-phase acceptance gates](#later-phase-acceptance-gates),
+the [P2–P6 atomic commit plan](#p2p6-atomic-commit-plan-and-alignment), and the
+existing requirement that acceptance evidence be replayable without the
+original chat remain governing. It clarifies how those gates are proven; it
+does not change P2–P5 behavior, replace their implementation tests, or expand
+the product contract.
+
+#### Evidence matrix and record contract
+
+The later P6 matrix must contain one self-contained proof row for every frozen
+acceptance test in P1–P5, plus one row for the P6 composite path. If a gate has
+independent checks (the four P5 checks below, for example), each check gets its
+own row or an explicitly enumerated sub-row; a single “suite passed” statement
+is not a substitute. The matrix uses these columns:
+
+| Column | Required content |
+| --- | --- |
+| `gate_id` | Stable gate/check identifier (`P1`, `P2`, `P3`, `P4`, `P5`, or `P6` plus a check slug) and the exact frozen acceptance text being proved. |
+| `command` | Copy/paste-ready command sequence, including setup, fixture creation, hook invocation, CLI invocation, and cleanup/inspection commands. No unrecorded manual edits or interactive choices. |
+| `cwd` | Absolute repository checkout and any isolated test-root/work directory used by the command. The checkout must be clean and the disposable data root must be identified separately. |
+| `sha` | Full 40-character commit SHA under test, including the harness/implementation tip when relevant; the evidence artifact itself records its own commit separately when it is in an evidence PR. |
+| `env` | Tool and runtime versions, OS/host assumptions, `SAFE_DELETE_ROOT`/retention/timezone inputs, PATH or hook configuration, and agent/tool/session context. Secret values and customer data are omitted or redacted. |
+| `utc` | RFC 3339 UTC start and end timestamps for the row, plus any controlled clock/age setup used for purge. |
+| `result` | Expected and observed status, exit category/code, relevant stdout/stderr or JSON assertions, and filesystem/ledger state before and after. |
+| `artifact` | Stable repository path or durable Issue/PR link to the redacted log, fixture, screenshot, manifest, or replay instructions. |
+| `coverage_note` | Supported route, explicit out-of-coverage boundary, or residual-risk annotation; this is mandatory for hook bypasses and Exception #12. |
+
+The row and its artifact together must answer what was run, where, against
+which commit, under which host context, and what changed. Logs are excerpts or
+structured outputs sufficient to verify the assertion, never secret-bearing
+environment dumps. Redaction must cover credentials, tokens, private paths,
+customer data, and unrelated workspace contents while leaving the command,
+result, and relevant identifiers understandable.
+
+#### Clean-checkout and replayability rules
+
+“Clean checkout” means a fresh clone or disposable worktree checked out at the
+recorded SHA, with no uncommitted or untracked product changes and no ambient
+local configuration that is not listed in the matrix. Setup, dependency
+installation, hook registration, PATH-shim activation, fixture creation, and
+the isolated `SAFE_DELETE_ROOT` must be created by the documented command
+sequence or the replay harness. Generated runtime data lives outside the
+checkout unless the matrix explicitly records the artifact path. A disposer
+must be able to copy the commands from the matrix and reproduce the same
+decision boundaries without asking the original Agent questions.
+
+The harness and documented-command options are interchangeable for the P6
+contract: either is acceptable, but both must be deterministic at the
+contract-relevant boundaries. A harness must print or persist the same matrix
+fields and fail on an unmet assertion; documented commands must be complete,
+ordered, explicit about expected nonzero exits, and free of hidden manual
+steps. In either form, the replay records the checkout SHA, repository/test
+cwd, exact command lines, UTC timestamps, environment assumptions, tool/agent/
+session context, outputs/status, and stable artifact locations.
+
+#### Full-path route and context coverage
+
+The P6 composite walk is:
+
+```text
+agent deletion request
+  → supported PreToolUse or PATH-shim hook
+  → one validated `safe-delete add` child invocation
+  → unified trash object + durable ledger `trash` event
+  → `list` / `show` inspection
+  → collision-safe `restore`
+  → controlled aged-entry `purge` preview and execute boundary
+```
+
+The P6 evidence plan must also map the direct CLI routes for `add`, `list`,
+`show`, `restore`, and `purge`, and must exercise both frozen interception
+vectors where supported: PreToolUse and the PATH shim. The hook record names the
+agent/host adapter and version, event or argv shape, selected configuration
+boundary, install/status state, PATH resolution for the shim, child command,
+metadata/context values, and the fact that the raw deletion did not execute.
+The direct CLI record names the caller, tool, session, root, and exact flags.
+The matrix keeps P2–P5 edge cases as their own proof rows; the composite path
+does not hide collision, invalid-metadata, fail-closed, bypass, retention, or
+partial-failure checks.
+
+The gate-to-proof mapping is:
+
+- **P1 — architecture provenance:** record the frozen contract source/commit,
+  the relevant `freeze.md` and exception references, and the disposer decision
+  when it exists. This is provenance, not a self-asserted ACK or product test.
+- **P2 — CLI + ledger + restore:** prove clean-root initialization and
+  `version`, `add` move/ledger durability for file and directory fixtures,
+  `list`/`show`/orphan reporting, restore success, occupied-destination
+  refusal, ledger-history preservation, and injected storage/ledger failure
+  without a silent raw deletion.
+- **P3 — rich metadata:** prove all six rich inputs and path normalization,
+  unknown nested `extensions` round-trip, absent-context null policy and
+  precedence, validation rejection before mutation, and P2-record reader/
+  restore compatibility with byte-for-byte legacy-line preservation.
+- **P4 — hook enforcement:** prove supported PreToolUse and PATH-shim forms
+  for `rm`, `unlink`, and `rmdir`, one safe-delete child call, raw-command
+  non-execution, fail-closed denial/failed-shim cases, pass-through probes,
+  installation lifecycle, and the frozen bypass inventory as explicitly
+  out-of-coverage.
+- **P5 — timed purge:** prove the four named Issue #7 checks—retention
+  boundary; dry-run/reporting with no mutation; partial failure plus retry and
+  crash-left `purge_pending`; and restore/missing/corrupt serialization and
+  audit behavior—using controlled ages and the documented timer command.
+- **P6 — composite:** prove the full hook-to-restore walk and then the
+  controlled aged-entry purge, while linking every assertion to the P1–P5
+  rows rather than treating the composite as a replacement for them.
+
+Restore-related rows carry an explicit coverage note for [accepted Exception
+#12](exceptions.md): `Exception #12 — P2-only same-UID staging publication —
+excluded model / residual risk; not a product-contract fail`. The supported
+restore proof may demonstrate ordinary operation, destination collision safety,
+and lifecycle history, but it must not claim isolation from a same-UID process
+that replaces a private staging entry at publication. Evidence must not label
+that model “fixed,” silently test it as supported, or reopen/expand the
+exception; it remains a coverage note on the restore proof.
+
+#### Evidence PR boundary and acceptance handoff
+
+Implementation/test-harness work and proof capture remain separate. The later
+proof branch uses the `evidence/` prefix (for example,
+`evidence/8-full-path-verification`) and the `pr:evidence` label. It may contain
+redacted logs, fixtures, screenshots, manifests, and replay instructions, but
+no feature/fix/product implementation diff, dependency change, or unrelated
+refactor. The P6 freeze docs PR is a separate `docs/8-p6-evidence-freeze`
+proposal labeled `docs` and `type:docs`; it is not the later evidence PR.
+Evidence that cannot safely live in the repository must still be linked from
+the Issue/PR with the same record fields and redaction standard.
+
+The P6 acceptance handoff has four gates:
+
+1. A disposer can replay the critical full path from a clean checkout using the
+   documented commands or harness.
+2. Every frozen P1–P5 acceptance test and the P6 composite has a proof row with
+   a command/result and stable artifact location.
+3. Raw deletion, metadata, restore, hook, and timed-purge boundaries are each
+   evidenced without hidden manual steps.
+4. The Agent may later post `EVIDENCE READY` with the proof matrix; only the
+   named disposer may post `PHASE ACCEPT`. Merge of any implementation, docs,
+   or evidence PR is not Phase PASS.
+
+The atomic P6 slices remain exactly those in the project plan and are not
+executed by this freeze proposal:
+
+1. `test: add full-path replay harness`.
+2. `docs: publish acceptance-to-proof matrix`.
+3. `evidence: capture full-path verification` — proof-only, `pr:evidence`, no
+   feature/fix/product implementation diff.
+
 ## Later-phase acceptance gates
 
 These are proposed, replayable gates. They are not verification results and do
