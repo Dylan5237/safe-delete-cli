@@ -1,0 +1,10 @@
+---
+description: Enforce the repository's pinned agent-project-ops project-operations contract.
+alwaysApply: true
+---
+
+Read root `AGENTS.md` and the pinned `.agent-project-ops/PRINCIPLES.md` before changing project state.
+
+Do not treat chat, a local checkout, or a projection remote as a second source of truth. Topic branches push to `origin` only; unknown remotes fail closed; PR merge is not Phase PASS.
+
+Before the first push in a fresh clone, verify `git config --get core.hooksPath` is `.githooks`; otherwise run `.agent-project-ops/scripts/install-hooks.sh`.

@@ -1,0 +1,10 @@
+# Process/binding surfaces. @Dylan5237 is substituted by bootstrap.
+/AGENTS.md @Dylan5237
+/CLAUDE.md @Dylan5237
+/.agent-project-ops/ @Dylan5237
+/.agents/ @Dylan5237
+/.claude/ @Dylan5237
+/.cursor/ @Dylan5237
+/.github/CODEOWNERS @Dylan5237
+/.github/copilot-instructions.md @Dylan5237
+/.githooks/ @Dylan5237

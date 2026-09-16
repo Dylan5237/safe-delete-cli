@@ -1,0 +1,10 @@
+# Process/binding surfaces. {{DISPOSER}} is substituted by bootstrap.
+/AGENTS.md {{DISPOSER}}
+/CLAUDE.md {{DISPOSER}}
+/.agent-project-ops/ {{DISPOSER}}
+/.agents/ {{DISPOSER}}
+/.claude/ {{DISPOSER}}
+/.cursor/ {{DISPOSER}}
+/.github/CODEOWNERS {{DISPOSER}}
+/.github/copilot-instructions.md {{DISPOSER}}
+/.githooks/ {{DISPOSER}}

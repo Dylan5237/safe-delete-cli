@@ -1,0 +1,3 @@
+# Keep executable shell surfaces portable across Windows/macOS/Linux.
+*.sh text eol=lf
+.githooks/* text eol=lf
