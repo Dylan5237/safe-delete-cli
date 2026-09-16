@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
-from typing import Any, Callable
+from typing import Any
 
 from . import CONTRACT_VERSION, SCHEMA_VERSION, __version__
 from .audit import AuditReport, LedgerEntry, audit_layout, is_uuid4
@@ -15,7 +16,22 @@ from .errors import (
     error,
     exit_code_for,
 )
-from .storage import Layout, normalized_path, initialize_layout, ledger_lock, require_layout
+from .ledger import (
+    append_event,
+    build_trash_record,
+    create_entry_directory,
+    inspect_source,
+    remove_empty_object_directory,
+)
+from .move import atomic_move
+from .storage import (
+    ensure_safe_target,
+    initialize_layout,
+    ledger_lock,
+    normalized_path,
+    require_layout,
+    same_filesystem,
+)
 
 
 def _common_options(parser: argparse.ArgumentParser) -> None:
@@ -190,12 +206,142 @@ def _handle_reserved(args: argparse.Namespace) -> tuple[list[Any], list[SafeDele
     ]
 
 
-def _handle_not_yet_implemented(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
-    # The move, writer, and restore slices replace these handlers in their
-    # respective atomic commits. Keeping dispatch explicit makes the staged
-    # P2 history reviewable and avoids pretending unsupported product behavior
-    # is complete in P2-S0.
-    return [], [error("usage_error", f"{args.command} is not available in this slice")]
+def _with_path(exc: SafeDeleteError, path: str) -> SafeDeleteError:
+    if "path" in exc.details:
+        return exc
+    return SafeDeleteError(exc.code, exc.message, {**exc.details, "path": path})
+
+
+def _rollback_trash_move(
+    *,
+    source_path: str,
+    payload_path: str,
+    object_directory: Any,
+    append_error: SafeDeleteError,
+) -> SafeDeleteError:
+    try:
+        atomic_move(payload_path, source_path)
+    except SafeDeleteError as rollback_error:
+        return error(
+            "rollback_failed",
+            "ledger append failed and trash payload rollback failed",
+            source=source_path,
+            trashed_path=payload_path,
+            append_error=append_error.code,
+            rollback_error=rollback_error.code,
+        )
+    try:
+        remove_empty_object_directory(object_directory)
+    except SafeDeleteError as cleanup_error:
+        return error(
+            "rollback_failed",
+            "ledger append failed after move; object cleanup failed",
+            source=source_path,
+            trashed_path=payload_path,
+            append_error=append_error.code,
+            rollback_error=cleanup_error.code,
+        )
+    return SafeDeleteError(
+        append_error.code,
+        append_error.message,
+        {
+            **append_error.details,
+            "source": source_path,
+            "trashed_path": payload_path,
+            "rolled_back": True,
+        },
+    )
+
+
+def _handle_add(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
+    layout = initialize_layout(args.root)
+    results: list[Any] = []
+    errors: list[SafeDeleteError] = []
+    with ledger_lock(layout, exclusive=True):
+        audit = audit_layout(layout)
+        if audit.errors:
+            return [], list(audit.errors)
+
+        for raw_path in args.paths:
+            try:
+                original_path = normalized_path(raw_path)
+                ensure_safe_target(layout, original_path)
+                source = inspect_source(layout, original_path)
+                if not same_filesystem(original_path, layout.objects):
+                    raise error(
+                        "cross_device",
+                        "source and trash objects are on different filesystems",
+                        source=original_path,
+                        destination=str(layout.objects),
+                    )
+                if args.dry_run:
+                    results.append(
+                        {
+                            "path": original_path,
+                            "original_path": original_path,
+                            "kind": source.kind,
+                            "dry_run": True,
+                        }
+                    )
+                    continue
+
+                entry_id, object_directory = create_entry_directory(layout)
+                payload_path = layout.payload(entry_id)
+                try:
+                    atomic_move(
+                        original_path,
+                        payload_path,
+                        destination_error_code="entry_id_collision",
+                    )
+                except SafeDeleteError:
+                    try:
+                        remove_empty_object_directory(object_directory)
+                    except SafeDeleteError as cleanup_error:
+                        errors.append(cleanup_error)
+                        continue
+                    raise
+
+                record = build_trash_record(
+                    entry_id=entry_id,
+                    original_path=original_path,
+                    trashed_path=str(payload_path),
+                    kind=source.kind,
+                )
+                try:
+                    append_event(layout, record)
+                except SafeDeleteError as append_error:
+                    errors.append(
+                        _rollback_trash_move(
+                            source_path=original_path,
+                            payload_path=str(payload_path),
+                            object_directory=object_directory,
+                            append_error=append_error,
+                        )
+                    )
+                    continue
+                results.append(
+                    {
+                        "entry_id": entry_id,
+                        "path": original_path,
+                        "original_path": original_path,
+                        "trashed_path": str(payload_path),
+                        "kind": source.kind,
+                        "state": "active",
+                    }
+                )
+            except SafeDeleteError as exc:
+                errors.append(_with_path(exc, raw_path))
+
+    if results and errors:
+        errors.append(
+            error(
+                "partial_failure",
+                "one or more add inputs failed after independent processing",
+                succeeded=len(results),
+                failed=len(errors),
+            )
+        )
+    return results, errors
 
 
 def _command_name(args: argparse.Namespace) -> str:
@@ -223,8 +369,10 @@ def _dispatch(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError
         args.command == "hook" and getattr(args, "hook_command", None) == "install"
     ):
         return _handle_reserved(args)
-    if args.command in {"add", "restore"}:
-        return _handle_not_yet_implemented(args)
+    if args.command == "add":
+        return _handle_add(args)
+    if args.command == "restore":
+        return [], [error("usage_error", "restore is not available in this slice")]
     return [], [error("usage_error", "a command is required")]
 
 
@@ -266,4 +414,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
-
