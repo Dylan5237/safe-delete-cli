@@ -73,6 +73,22 @@ def _timedelta_from_days(days: int, *, field_name: str) -> _datetime.timedelta:
         ) from exc
 
 
+def _cutoff_from_threshold(
+    as_of: _datetime.datetime,
+    threshold: _datetime.timedelta,
+    *,
+    field_name: str,
+    value: Any,
+) -> _datetime.datetime:
+    try:
+        return as_of - threshold
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise _usage(
+            f"{field_name} is outside the supported retention range",
+            value=value,
+        ) from exc
+
+
 def parse_older_than(value: str) -> tuple[_datetime.timedelta, str, int | float]:
     """Parse the frozen positive-integer ``d``/``h`` duration grammar."""
 
@@ -121,17 +137,25 @@ def parse_rfc3339(value: str, *, field_name: str = "timestamp") -> _datetime.dat
     source = value[:-1] + "+00:00" if value.endswith("Z") else value
     try:
         parsed = _datetime.datetime.fromisoformat(source)
-    except (TypeError, ValueError) as exc:
+    except (OverflowError, TypeError, ValueError) as exc:
         raise _usage(
             f"{field_name} must be a valid RFC3339 timestamp",
             value=value,
         ) from exc
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
+    try:
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise _usage(
+                f"{field_name} must include a timezone",
+                value=value,
+            )
+        return parsed.astimezone(_datetime.timezone.utc)
+    except SafeDeleteError:
+        raise
+    except (OverflowError, TypeError, ValueError) as exc:
         raise _usage(
-            f"{field_name} must include a timezone",
+            f"{field_name} must be a valid RFC3339 timestamp",
             value=value,
-        )
-    return parsed.astimezone(_datetime.timezone.utc)
+        ) from exc
 
 
 def format_utc(value: _datetime.datetime) -> str:
@@ -168,16 +192,26 @@ class RetentionPolicy:
             raise _usage("--older-than and --before are mutually exclusive")
 
         as_of = now if now is not None else utc_now()
-        if as_of.tzinfo is None or as_of.utcoffset() is None:
-            raise _usage("purge clock must include a timezone")
-        as_of = as_of.astimezone(_datetime.timezone.utc)
+        try:
+            if as_of.tzinfo is None or as_of.utcoffset() is None:
+                raise _usage("purge clock must include a timezone")
+            as_of = as_of.astimezone(_datetime.timezone.utc)
+        except SafeDeleteError:
+            raise
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise _usage("purge clock is outside the supported range") from exc
 
         if older_than is not None:
             threshold, duration_text, days = parse_older_than(older_than)
             return cls(
                 source="older_than",
                 as_of=as_of,
-                cutoff=as_of - threshold,
+                cutoff=_cutoff_from_threshold(
+                    as_of,
+                    threshold,
+                    field_name="--older-than",
+                    value=older_than,
+                ),
                 threshold=threshold,
                 threshold_days=days,
                 threshold_duration=duration_text,
@@ -208,7 +242,12 @@ class RetentionPolicy:
             return cls(
                 source="environment",
                 as_of=as_of,
-                cutoff=as_of - threshold,
+                cutoff=_cutoff_from_threshold(
+                    as_of,
+                    threshold,
+                    field_name="SAFE_DELETE_RETENTION_DAYS",
+                    value=days,
+                ),
                 threshold=threshold,
                 threshold_days=days,
                 threshold_duration=f"{days}d",
@@ -221,7 +260,12 @@ class RetentionPolicy:
         return cls(
             source="default",
             as_of=as_of,
-            cutoff=as_of - threshold,
+            cutoff=_cutoff_from_threshold(
+                as_of,
+                threshold,
+                field_name="default retention",
+                value=DEFAULT_RETENTION_DAYS,
+            ),
             threshold=threshold,
             threshold_days=DEFAULT_RETENTION_DAYS,
             threshold_duration=f"{DEFAULT_RETENTION_DAYS}d",
