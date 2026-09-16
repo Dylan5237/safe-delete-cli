@@ -29,10 +29,14 @@ Issue: [#3](https://github.com/Dylan5237/safe-delete-cli/issues/3)
 
 Issue: [#4](https://github.com/Dylan5237/safe-delete-cli/issues/4)
 
+- `feat: add CLI surface + ledger bootstrap` (P2-S0) — command dispatch,
+  `init`, `list` (including orphan reconciliation), `show`, `version`, shared
+  `--root`/`--json` output envelope, reserved exit categories, and the frozen
+  machine-readable error vocabulary.
 - `feat: add unified trash move primitive` — one focused move operation for the
   frozen file/directory and failure semantics.
 - `feat: add minimum ledger writer` — append the frozen minimum record for each
-  successful operation.
+  successful operation and replay the lifecycle/audit contract.
 - `feat: add restore command` — lookup, collision handling, and recovery under
   the frozen contract.
 - `test: cover cli ledger and restore contract` — implementation tests only;

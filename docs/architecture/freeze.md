@@ -1,7 +1,8 @@
 # CONTRACT FREEZE PROPOSAL — Phase 1: Safe-delete architecture contract
 
-**Status:** Contract Freeze proposal only; pending review and `FREEZE ACK` by
-`@Dylan5237` on [Issue #3](https://github.com/Dylan5237/safe-delete-cli/issues/3).
+**Status:** Contract Freeze proposal only; revised after Kimi Code `REQUEST_CHANGES`,
+pending review and `FREEZE ACK` by `@Dylan5237` on
+[Issue #3](https://github.com/Dylan5237/safe-delete-cli/issues/3).
 
 **Contract ID:** `safe-delete/p1` · proposed version `1`
 
@@ -39,13 +40,16 @@ safety, hook failure behavior, and acceptance gates.
 ### In scope
 
 - The CLI command surface and machine-readable output expectations.
-- One configurable, unified trash root shared by projects for a user.
+- One unified trash root shared by projects for a user, with an explicit
+  same-filesystem operational boundary.
 - An append-only UTF-8 JSONL ledger with versioned lifecycle events.
 - P2 minimum fields and P3 rich metadata fields.
 - Collision, path, atomicity, restore, and failure semantics.
 - The adapter-neutral hook contract for supported agent/tool boundaries.
-- Default purge retention, dry-run behavior, cron/timer invocation, and audit
-  semantics.
+- Default purge retention, its configuration source, dry-run behavior, cron/timer
+  invocation, and audit semantics.
+- The initial machine-readable error-code vocabulary and the complete lifecycle
+  state machine, including crash recovery and orphan-payload audit behavior.
 - Replayable acceptance gates for P2, P3, P4, P5, and P6.
 
 ### Out of scope for this proposal
@@ -60,7 +64,9 @@ safety, hook failure behavior, and acceptance gates.
 
 ### Deferred to later phases
 
-- **P2:** CLI, atomic trash move, minimum ledger writer, and restore.
+- **P2:** CLI surface/bootstrap (`init`, `list`, `show`, `version`, shared
+  `--json`/exit behavior), atomic trash move, minimum ledger writer, orphan
+  audit reporting, and restore.
 - **P3:** rich project/session/reason/agent/tool metadata and compatibility
   tests.
 - **P4:** concrete PreToolUse adapters, `rm` shim, installation, and hook
@@ -101,16 +107,21 @@ AI agent → configured hook boundary → safe-delete CLI
 
 The executable is `safe-delete`. All commands accept the global options
 `--root DIR` (or `SAFE_DELETE_ROOT`) and `--json` where output is meaningful.
-Paths are passed after `--` when an option-like path must be unambiguous.
+Paths are passed after `--` when an option-like path must be unambiguous. P2
+freezes the shared machine-readable surface: `--json` writes one UTF-8 JSON
+object per invocation with `command`, `ok`, `results`, and `errors` top-level
+keys; batch commands put one result per input in `results`, and every error
+object has a frozen `code` from the vocabulary below. P2 owns the exact
+command-specific result fields without changing those envelope invariants.
 
 | Command | Contract and important flags |
 | --- | --- |
 | `safe-delete init` | Create the root, `trash/objects`, `locks`, and ledger if absent. `--root DIR`, `--json`. Never removes existing data. |
 | `safe-delete add PATH...` | Move each existing regular file, directory, or symlink into trash and append one `trash` event per successful path. `--reason TEXT`, `--project DIR`, `--session-id ID`, `--agent ID`, `--tool ID`, `--dry-run`, `--root DIR`, `--json`. |
-| `safe-delete list` | List active entries by default. `--all` includes restored, purge-pending, purged, and failed entries; `--project DIR`, `--original PATH`, `--json`, `--root DIR`. Malformed records are reported, never guessed. |
+| `safe-delete list` | List active entries by default. `--all` includes active, recoverable `purge_pending`, restored, purged, and audit-error records; `--orphans` reports only payload objects with no matching valid `trash` event; `--project DIR` and `--original PATH` are exact normalized-path filters; `--json`, `--root DIR`. The normal list also reports orphan and ledger audit errors. |
 | `safe-delete show ENTRY_ID` | Show the immutable creation record and lifecycle events for an entry. `--json`, `--root DIR`. |
 | `safe-delete restore ENTRY_ID` | Move an active payload to its original path. `--to PATH` is an explicit alternate destination; `--create-parents` opts into creating missing parents; `--json`, `--root DIR`. Existing destinations are never overwritten. |
-| `safe-delete purge` | Preview eligible entries by default. `--dry-run` is explicit preview; physical deletion requires both `--execute` and `--yes`. Optional `--older-than DURATION` or `--before RFC3339` may narrow/override the configured threshold; `--json`, `--root DIR`. |
+| `safe-delete purge` | Preview eligible entries by default. `--dry-run` is explicit preview; physical deletion requires both `--execute` and `--yes`. Optional mutually exclusive `--older-than DURATION` or `--before RFC3339` overrides the retention default for that invocation; `--json`, `--root DIR`. |
 | `safe-delete hook install AGENT` | Reserved for P4 adapter packages. Installation is not part of the P1 or P2 implementation. |
 | `safe-delete version` | Print the CLI and contract versions without touching trash or ledger state. |
 
@@ -125,14 +136,72 @@ Paths are passed after `--` when an option-like path must be unambiguous.
 - Successful commands emit stable JSON objects when `--json` is supplied and
   diagnostics to stderr. The CLI does not print a success response for a
   physically moved item until its ledger event is durable.
+- A command reserved for a later phase exits with usage category `2` and
+  `unsupported_command`; it does not mutate the filesystem or ledger. Thus
+  `purge` is unavailable until P5 and `hook install` until P4, while the P2
+  surface is owned by the P2-S0 slice below.
 - The reserved exit categories are: `0` success, `2` usage/unsupported input,
   `3` destination or identity conflict, `4` storage/ledger failure, and `5`
   partial batch failure. Exact numeric mapping is implementation detail only
   if the named category and machine-readable error code remain stable.
 - A source that does not exist, a root path, a path inside the trash root, an
-  unsafe ancestor/descendant relationship with the trash root, or a
-  cross-device move is rejected with the source left unchanged.
+  unsafe ancestor/descendant relationship with the trash root, a non-UTF-8
+  path, or a cross-device move is rejected with the source left unchanged.
+- `--dry-run` and `--execute` are mutually exclusive. `--execute` without
+  `--yes` is a usage/confirmation error; the CLI never guesses the operator's
+  intent.
 - No command has an implicit `--overwrite`, and no hook may add one.
+
+### Frozen machine-readable error vocabulary
+
+The following lowercase `snake_case` strings are the initial stable vocabulary
+from P2 onward. They are the values of JSON error `code`; hook `reason_code`
+uses these CLI values where applicable and has the small hook-only vocabulary
+listed after the table. Implementations may add human-readable messages, but
+may not rename, silently repurpose, or replace these codes in contract version
+`1`. Lifecycle event `error_code` values, including the required
+`purge_failed` classification, use the same CLI vocabulary.
+
+| Code | Meaning and primary use | Reserved exit category |
+| --- | --- | --- |
+| `usage_error` | Invalid argument, ID, duration, timestamp, or conflicting flags. | `2` |
+| `unsupported_command` | A recognized command reserved for a later phase. | `2` |
+| `source_not_found` | An `add` source does not exist. | `2` |
+| `unsupported_kind` | A special file or otherwise unsupported source kind. | `2` |
+| `unsupported_path_encoding` | A path cannot be represented as UTF-8 JSONL. | `2` |
+| `path_forbidden` | Root, ledger, lock, trash, or unsafe root relationship was targeted. | `2` |
+| `cross_device` | Source/trash or restore-destination/trash devices differ, or rename returned `EXDEV`. | `2` |
+| `destination_exists` | Restore destination exists according to `lstat`, including a dangling symlink. | `3` |
+| `destination_parent_missing` | Restore parents are missing and `--create-parents` was not supplied. | `3` |
+| `entry_not_found` | No ledger entry exists for the requested ID. | `3` |
+| `entry_not_restorable` | The entry is not in `active` state, including unresolved `purge_pending`. | `3` |
+| `already_restored` | Idempotent repeat of a completed restore; no mutation occurs. | `0` |
+| `already_purged` | A queried entry is already terminal `purged`; no mutation occurs. | `0` |
+| `entry_id_collision` | Exclusive object creation found an existing entry identity. | `3` |
+| `unsupported_schema_version` | A record uses a schema major this implementation cannot read. | `4` |
+| `malformed_ledger` | A JSONL line or required field is malformed. | `4` |
+| `duplicate_event_id` | An `event_id` occurs more than once in the ledger. | `4` |
+| `impossible_transition` | Events cannot form the frozen lifecycle state machine. | `4` |
+| `payload_missing` | A valid ledger entry requires a payload that is absent. | `4` |
+| `orphan_payload` | A trash object payload has no matching valid `trash` event. | `4` |
+| `ledger_failure` | Ledger open, lock, append, flush, or durability operation failed. | `4` |
+| `storage_failure` | A filesystem operation failed without a more specific code. | `4` |
+| `rollback_failed` | A failed transactional operation could not return the payload to its prior path. | `4` |
+| `purge_remove_failed` | A valid purge candidate could not be physically removed; its payload remains. | `5` |
+| `partial_failure` | A batch or purge completed some independent work but not all of it. | `5` |
+
+Audit codes are not inferred away: read-only commands report the specific code,
+and destructive commands use the same code while failing closed as defined in
+the ledger audit section.
+
+Hook-only `reason_code` values are also stable: `raw_delete` means a recognized
+request is being routed, `unsupported_delete_invocation` means a deletion
+request is denied because it cannot be proven safe, `cli_unavailable` means the
+safe-delete executable cannot be run, `storage_unavailable` means its root or
+ledger cannot be used, and `safe_delete_error` means the CLI returned an error
+without a more specific propagated code. A hook propagates a specific CLI code
+such as `cross_device` when one is available; these values do not add new
+filesystem behavior.
 
 ## Storage layout and identity
 
@@ -145,6 +214,19 @@ ${SAFE_DELETE_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/safe-delete}
 An explicit `--root` takes precedence over the environment. The root is one
 unified namespace for the current user; it is not a `.trash` directory per
 project.
+
+### Same-filesystem operational boundary
+
+The unified root intentionally serves one filesystem: every supported source
+path and `<root>/trash/objects` must be on the same filesystem so the move can
+be an atomic rename. A source on another device or mount is rejected by design
+with `cross_device`; the source remains unchanged. A hook that encounters such
+a source returns `deny` (and an `rm` shim exits failed) after the underlying
+`safe-delete add` result; it never falls back to raw deletion or copying.
+Operators must place the root on the workspace volume, or otherwise configure
+the root on the same volume as the workspaces it is meant to serve. A single
+root is not a multi-volume trash service; this operational limitation is part
+of the contract for disposer acceptance.
 
 ```text
 <root>/
@@ -163,29 +245,67 @@ where the host supports them. `trashed_path` is the absolute path to
 
 ### Identity and collision policy
 
-- Every trash operation receives a cryptographically random UUID/ULID-like
-  `entry_id`; the ID is the identity, not the original basename or project.
+- Every trash operation receives a cryptographically random RFC 9562 UUID
+  version 4. `entry_id` and `event_id` use the same canonical form: 36-character
+  lowercase hexadecimal UUID text with hyphens, with no `ent-` or `evt-` prefix.
+  `entry_id` is unique within the root's object/ledger namespace and
+  `event_id` is unique across the ledger; both are identity values, not the
+  original basename or project.
 - The object directory is created with exclusive creation. An ID collision is
   retried; an existing object is never overwritten or reused.
 - Multiple historical entries may have the same `original_path`. `list` must
   expose each distinct `entry_id`.
-- Restore defaults to the recorded `original_path`. If that destination exists,
-  restore fails with a collision and leaves the payload and ledger unchanged.
-  The operator may choose a non-existing `--to PATH`; the effective destination
-  is recorded in the restore event. Automatic renaming and overwrite are not
-  part of this contract.
+- Restore defaults to the recorded `original_path`. If that destination exists
+  according to `lstat` (including a dangling final symlink), restore fails with
+  a collision and leaves the payload and ledger unchanged. Existing parent
+  symlinks are resolved consistently before the operation; the final
+  destination symlink is never followed. The operator may choose a non-existing
+  `--to PATH`; the effective destination is recorded in the restore event.
+  Automatic renaming and overwrite are not part of this contract. Where the
+  platform supports it, restore uses an atomic no-replace rename; otherwise the
+  implementation must document and test the residual check/rename race and
+  still must not intentionally overwrite.
 - Paths are stored as absolute, normalized paths. The final symlink is not
   dereferenced for `add`; existing parent symlinks are resolved consistently by
   the implementation before the move. The trash root, its ledger, and its lock
-  files are never valid deletion targets.
+  files are never valid deletion targets. Paths containing bytes that are not
+  valid UTF-8 are rejected with `unsupported_path_encoding` before a move.
 - The default move must be an atomic same-filesystem rename. On `EXDEV` or any
   unavailable atomic primitive, the CLI fails closed and leaves the source in
   place; P1 does not authorize a copy/delete fallback.
-- The ledger is serialized with the lock. An append is newline-delimited,
-  UTF-8, and flushed durably before the CLI reports success. If a ledger append
-  fails after a move, the CLI attempts to roll the payload back. If rollback
-  also fails, it returns a storage error and prints both paths for manual
-  recovery; it never falls back to raw deletion.
+- The ledger is serialized with an OS `flock` on `locks/ledger.lock`; the lock is
+  automatically released when the process exits, so no stale-lock cleanup is
+  required. An append is newline-delimited, UTF-8, and flushed durably before
+  the CLI reports success. If a ledger append fails after a move, the CLI
+  attempts to roll the payload back. If rollback also fails, it returns
+  `rollback_failed`/`orphan_payload` and prints both paths for the documented
+  manual recovery route below; it never falls back to raw deletion.
+
+### Orphan payload audit and recovery
+
+An orphan payload is a payload under `<root>/trash/objects/<entry_id>/payload`
+whose directory ID has no matching valid `trash` event in the ledger. The
+failure window is intentional and bounded: `add` performs best-effort rollback
+when its ledger append fails, but a failed rollback must not make the remaining
+payload invisible.
+
+`list` always reconciles the object directories with valid creation events.
+It reports an orphan as an `orphan_payload` audit error with its `entry_id` and
+`trashed_path`; `list --orphans` restricts the report to these reconciliation
+results. An orphan is not a normal ledger entry and is never eligible for
+`restore` or `purge`. The report is produced even when other valid entries can
+still be listed.
+
+The documented recovery steps are: (1) preserve the orphan payload and save
+the failed `add` diagnostic, including its printed source and trash paths; (2)
+inspect the payload and verify the intended original path; (3) if that path is
+known, absent, and on the same filesystem, an operator may move the payload
+back with a no-overwrite operation, or may leave it quarantined for review if
+the path is occupied or unknown; (4) remove only an empty, verified object
+directory after the recovery is recorded in the operator's audit log. A
+cross-device or uncertain recovery remains quarantined and is escalated; no
+copy/delete fallback, guessed ledger event, overwrite, or raw deletion is
+allowed. The orphan remains visible to `list` until its object is resolved.
 
 ## Ledger contract
 
@@ -197,16 +317,25 @@ computed by replaying valid events for an entry in file order.
 ### Versioning and compatibility
 
 - `schema_version` is the integer ledger schema major, currently `1`.
+- This document's `safe-delete/p1` contract version is `1`; contract version 1
+  requires ledger `schema_version: 1` and hook `protocol_version: 1`. The three
+  numbers are related but independently scoped: an incompatible ledger change
+  increments `schema_version`, an incompatible hook wire change increments
+  `protocol_version`, and a behavior/interface change increments the contract
+  version as appropriate. A contract revision does not silently reinterpret an
+  existing schema or protocol.
 - Additive fields in schema `1` are allowed only as defined core fields or
   inside `extensions`; they do not change the version.
 - A breaking change increments `schema_version`. A reader must not restore or
-  purge an entry with an unsupported future version; it reports the entry as
-  unsupported instead.
+  purge an entry with an unsupported future version; read-only commands report
+  the affected entry as `unsupported_schema_version`, while destructive
+  commands fail closed under the audit rules below.
 - P3 readers treat a missing P2 rich field as `null` and preserve unknown
   `extensions`. They must not rewrite old lines just to add fields.
-- A malformed line, duplicate `event_id`, or impossible lifecycle transition
-  is an audit error. `list` reports it; destructive commands fail closed rather
-  than inferring state.
+- A malformed line, duplicate `event_id`, unsupported schema, missing required
+  field, or impossible lifecycle transition is an audit error. The command
+  blast radius is fixed in the table below; no command may infer state from a
+  record it has classified as erroneous.
 
 ### Fields
 
@@ -215,8 +344,8 @@ computed by replaying valid events for an entry in file order.
 | `schema_version` | Required integer `1` | Required | Ledger schema major. |
 | `event_id` | Required unique ID | Required | Unique event identity for replay/deduplication. |
 | `entry_id` | Required unique ID | Required | Stable identity of the trashed payload. |
-| `operation` | Required: `trash` or `restore` | Also `purge_intent`, `purge_complete`, `purge_failed` | Lifecycle event. |
-| `state` | Required: `active` or `restored` | Also `purge_pending` or `purged` | Resulting logical state after the event. |
+| `operation` | Required: `trash` or `restore` | Also `purge_intent`, `purge_complete`, `purge_failed` | Lifecycle event. `purge_failed` is an event, not a state name. |
+| `state` | Required: `active` or `restored` | Also `purge_pending` or `purged` | Resulting logical state after the event. A `purge_failed` event always records `active`. |
 | `original_path` | Required on every event | Required | Absolute normalized source/destination path recorded at `add`. |
 | `trashed_path` | Required on every event | Required | Absolute payload path under the unified root. |
 | `kind` | Required: `file`, `directory`, or `symlink` | Required | Entry kind; special files are rejected. |
@@ -233,21 +362,72 @@ computed by replaying valid events for an entry in file order.
 The P2 creation record is therefore at least:
 
 ```json
-{"schema_version":1,"event_id":"evt-…","entry_id":"ent-…","operation":"trash","state":"active","original_path":"/workspace/app/file.txt","trashed_path":"/home/user/.local/share/safe-delete/trash/objects/ent-…/payload","kind":"file","timestamp":"2026-09-16T07:00:00Z"}
+{"schema_version":1,"event_id":"0f8fad5b-d9cb-469f-a165-70867728950e","entry_id":"550e8400-e29b-41d4-a716-446655440000","operation":"trash","state":"active","original_path":"/workspace/app/file.txt","trashed_path":"/home/user/.local/share/safe-delete/trash/objects/550e8400-e29b-41d4-a716-446655440000/payload","kind":"file","timestamp":"2026-09-16T07:00:00Z"}
 ```
 
 A P3 creation record adds the reserved rich keys, including explicit `null`
 values when context is unavailable:
 
 ```json
-{"schema_version":1,"event_id":"evt-…","entry_id":"ent-…","operation":"trash","state":"active","original_path":"/workspace/app/file.txt","trashed_path":"/home/user/.local/share/safe-delete/trash/objects/ent-…/payload","kind":"file","timestamp":"2026-09-16T07:00:00Z","project":"/workspace/app","session_id":"sess-123","reason":"remove generated artifact","agent":"codex/luna","tool":"pretooluse:shell","extensions":{}}
+{"schema_version":1,"event_id":"6ba7b810-9dad-41d1-80b4-00c04fd430c8","entry_id":"550e8400-e29b-41d4-a716-446655440000","operation":"trash","state":"active","original_path":"/workspace/app/file.txt","trashed_path":"/home/user/.local/share/safe-delete/trash/objects/550e8400-e29b-41d4-a716-446655440000/payload","kind":"file","timestamp":"2026-09-16T07:00:00Z","project":"/workspace/app","session_id":"sess-123","reason":"remove generated artifact","agent":"codex/luna","tool":"pretooluse:shell","extensions":{}}
 ```
 
-`restore` appends a completed restore event only after the move succeeds;
+`restore` appends a completed restore event only after the move succeeds.
 `purge` uses a durable `purge_intent` before physical removal and then appends
-`purge_complete`. A failed purge appends `purge_failed` while retaining the
-payload, so retry is safe. Replaying the ledger must leave a purged payload
-ineligible for restore and a restored payload ineligible for purge.
+`purge_complete`. A failed physical removal appends `purge_failed` with
+`state: "active"` while retaining the payload, so the entry is eligible for
+restore or a later purge retry. If the process stops after `purge_intent` while
+the payload is still present, the replayed `purge_pending` entry is also a
+retry candidate. Replaying the ledger must leave a purged payload ineligible
+for restore and a restored payload ineligible for purge.
+
+### Audit-error blast radius
+
+The following rules apply uniformly to malformed JSONL rows, duplicate
+`event_id`, unsupported schema versions, missing required fields, impossible
+lifecycle transitions, and ledger/object inconsistencies such as an orphan or
+missing payload:
+
+| Command | Contractual behavior on an audit error |
+| --- | --- |
+| `list` (including `--all` and `--orphans`) | Report the specific error, skip only the affected entry when it can be localized, continue listing unrelated valid entries, and exit nonzero if any audit error was found. A malformed line with no recoverable `entry_id` is reported as a ledger-level error. |
+| `show` | Report the requested entry's audit error without guessing its state and exit nonzero; unrelated valid entries are not changed. |
+| `add` | Preflight the existing ledger under the lock and fail closed before moving any input if an audit error exists. If the new append fails after a move, use the rollback/orphan rules above. |
+| `restore` | Fail closed for the whole command before moving a payload if any audit error is found during ledger/object preflight; it never restores based on a partial replay. |
+| `purge` | Perform the same full preflight and fail closed for the whole command, with no `purge_intent`, if any audit error is found. It does not skip a bad row and continue. |
+
+After a valid preflight, ordinary per-entry filesystem or purge-removal
+failures are not audit errors: `purge` appends `purge_failed` with
+`purge_remove_failed`, retains that payload, continues other independent
+entries, and returns `partial_failure`/exit category `5`. This distinction
+resolves the apparent tension between fail-closed ledger replay and continued
+processing of valid purge candidates.
+
+### Lifecycle state machine and crash recovery
+
+The only logical states are `active`, `purge_pending`, `restored`, and
+`purged`. `restored` and `purged` are terminal. `purge_pending` is a
+recoverable in-flight state, not a terminal failure state; `purge_failed`
+always transitions back to `active`.
+
+| Current state | Event or condition | Required action | Next state |
+| --- | --- | --- | --- |
+| none | `trash` after successful move and durable append | Create the unique object and record its initial retention timestamp. | `active` |
+| `active` | `restore` | Under the ledger lock, validate payload and destination, perform the no-overwrite same-filesystem move, then append the completed event. | `restored` |
+| `active` | eligible `purge_intent` | Under the ledger lock, durably append intent before removing any payload. | `purge_pending` |
+| `purge_pending` | physical removal succeeds | Append `purge_complete` only after the payload is gone. | `purged` |
+| `purge_pending` | physical removal fails and payload remains | Append `purge_failed` with a stable error code, retaining the payload. | `active` |
+| `purge_pending` | process crash/interruption after `purge_intent`, payload still present | On the next `purge`, treat the last-event `purge_intent` entry as a recovery candidate and retry physical removal under the lock; success goes to `purge_complete`, failure goes through `purge_failed`. | `purge_pending` until resolved, then `purged` or `active` |
+| `purge_pending` | payload absent before a valid `purge_complete` is recorded | Report `payload_missing`/an incomplete purge as an audit error; do not infer `purged`, restore, or retry it automatically. | `purge_pending` but blocked |
+| `restored` or `purged` | any further lifecycle mutation | Reject as a terminal-state operation; retain the history. | unchanged |
+
+An `active` entry whose last event is `purge_failed` is therefore both restore
+eligible and purge eligible when old enough. A `purge_pending` entry is a purge
+candidate only when its last event is `purge_intent` and its payload is still
+present; this is the explicit crash-recovery exception to the normal `active`
+candidate rule. `list --all` names these states exactly and never uses an
+undefined "failed" state. A physical removal followed by a crash before
+`purge_complete` is intentionally an audit error rather than an unsafe guess.
 
 ### P3 metadata source and missing-value policy
 
@@ -266,19 +446,32 @@ context, supported environment context, then detected value where defined:
 `timestamp` is generated by the CLI in UTC. Caller-supplied timestamps are not
 accepted as the audit timestamp.
 
+P3 is implemented before concrete P4 adapters exist, so P3 acceptance tests
+exercise the precedence chain through explicit flags and supported environment
+variables. Hook-provided context is tested once the P4 adapter is available; it
+does not change the frozen precedence.
+
 ## Restore semantics
 
 `safe-delete restore ENTRY_ID` selects one active entry by stable ID, checks
 that the payload exists and is a supported schema, checks the destination, and
 moves the payload back. The default destination is `original_path`; `--to` is
 an explicit alternative. It never overwrites, follows the deleted final
-symlink, or silently restores a different entry.
+symlink, or silently restores a different entry. It holds the ledger `flock`
+from state/destination validation through the move and durable restore-event
+append, so it cannot interleave with purge. If the destination is on another
+filesystem, restore fails closed with `cross_device`; it never copies.
 
 Missing parent directories cause a safe failure by default. `--create-parents`
-is the explicit opt-in and is covered by restore tests. A restored entry stays
+is the explicit opt-in and is covered by restore tests. Destination existence
+uses `lstat`, so a dangling final symlink is a collision; parent symlinks are
+resolved according to the normalized-path rule above. A restored entry stays
 in the ledger for audit and is not eligible for a later purge. Repeating the
 same restore returns an idempotent `already_restored` result without changing
-the filesystem.
+the filesystem. If the restore append fails after the move, the CLI attempts a
+same-filesystem rollback under the same lock; a failed rollback returns
+`rollback_failed` with both paths and leaves the discrepancy for `list` audit
+reporting rather than guessing a completed restore.
 
 ## Hook contract
 
@@ -322,6 +515,11 @@ or:
   cannot prove safe, missing metadata required by the host, unavailable CLI,
   unwritable storage/ledger, or a nonzero CLI result all produce `deny` or a
   failed shim exit. Raw deletion is never the fallback.
+- Non-deletion invocations such as `rm` with no operands or `rm --help`/
+  `rm --version` pass through unchanged; they do not route or deny. Wrappers
+  such as `sudo`, `env`, `nice`, `xargs`, or `sh -c`, and shell aliases or
+  functions, are outside the guaranteed recognition boundary unless the host
+  adapter explicitly normalizes them.
 
 ### Known bypass limits
 
@@ -335,11 +533,22 @@ product could make that stronger, and that is a non-goal.
 
 ## Purge policy
 
-- Default retention is **30 days** from the initial `trash` event’s UTC
-  `timestamp`.
+- The retention source is deliberately fixed: the default is a **30-day
+  hardcoded** period from the initial `trash` event's UTC `timestamp`;
+  `SAFE_DELETE_RETENTION_DAYS` may replace that default with a positive decimal
+  integer number of days; and `--older-than DURATION` or `--before RFC3339` may
+  override it for one invocation. There is no `<root>/config` file and no
+  persistent retention setting in the P1–P5 contract.
+- Threshold precedence is `--older-than`/`--before` (exactly one, if supplied),
+  then `SAFE_DELETE_RETENTION_DAYS`, then the hardcoded 30 days. An invalid
+  environment value or flag is `usage_error`. The selected threshold or
+  absolute cutoff is visible in dry-run JSON output.
 - `purge` defaults to dry-run and has no physical deletion side effect.
   Execution requires explicit `--execute --yes`; a non-interactive cron/timer
   invocation must include both.
+- `--older-than` and `--before` together are a `usage_error`, as are
+  `--dry-run` and `--execute` together. `--execute` without `--yes` is a
+  confirmation error and performs no mutation.
 - The recommended daily timer is equivalent to:
 
   ```cron
@@ -347,16 +556,21 @@ product could make that stronger, and that is a non-goal.
   ```
 
   Installation and platform-specific service files are deferred to P5.
-- Only active entries older than the threshold are candidates. Restored,
-  purge-pending, purged, failed-schema, malformed, future-dated, and unknown
-  entries are skipped and reported.
-- `--older-than` or `--before` may explicitly select a different threshold;
-  the default timer never overrides 30 days. A threshold shorter than the
-  configured default requires explicit operator flags and is visible in the
-  dry-run output.
-- Purge holds the ledger lock, processes entries independently, and continues
-  after a per-entry failure. It returns a partial-failure result if any entry
-  was not processed; failed entries retain their payload.
+- Only `active` entries older than the selected threshold are ordinary
+  candidates. A `purge_pending` entry whose last event is `purge_intent` and
+  whose payload is still present is an additional crash-recovery candidate;
+  its age is still anchored to the initial `trash` event. Restored, purged,
+  unresolved pending entries, audit-error entries, future-dated entries, and
+  unknown entries are not eligible.
+- Purge holds the ledger `flock` for preflight and the full candidate loop,
+  processes valid candidates independently, and continues after a per-entry
+  removal failure. It appends `purge_failed` with `state: "active"` and
+  `purge_remove_failed` when the payload remains, then returns a partial-failure
+  result if any candidate was not processed.
+- Before any `purge_intent`, purge must complete the full audit preflight in the
+  ledger audit table. Any malformed/duplicate/impossible/unsupported ledger
+  record, orphan payload, or missing payload makes the entire purge fail closed;
+  it is not skipped while other entries continue.
 - Purge removes payload data only after a durable `purge_intent` event and
   records `purge_complete` only after removal. The ledger history is retained;
   ledger compaction is deferred and cannot erase the audit trail implicitly.
@@ -370,10 +584,10 @@ not grant Phase Accept.
 
 | Phase | Acceptance gate |
 | --- | --- |
-| P2 — CLI + ledger + restore | In a clean test root, `add` moves a file and directory without leaving the source, emits stable IDs, and appends valid P2 records. `list` finds them. `restore` returns each to the original path, refuses an occupied destination without changing either side, and preserves the ledger history. Injected ledger/storage failure leaves no silent raw delete. |
+| P2 — CLI + ledger + restore | In a clean test root, the P2-S0 surface initializes storage, reports `version`, lists/shows valid entries, and reports an injected orphan through `list --orphans`. `add` moves a file and directory without leaving the source, emits canonical UUID IDs, and appends valid P2 records. `restore` returns each to the original path, refuses an occupied destination without changing either side, and preserves the ledger history. Injected ledger/storage failure leaves no silent raw delete and emits a frozen error code. |
 | P3 — rich metadata | A deletion supplied with project, session, reason, agent, and tool context persists exact values, uses `null` when unavailable, and preserves arbitrary `extensions`. A P3 reader lists and restores P2 records with omitted rich fields without rewriting them. |
-| P4 — hook enforcement | Supported PreToolUse and shim forms route to `safe-delete add`; the original raw command never executes. Unsupported/ambiguous forms, unavailable CLI, unwritable root, and CLI failure deny. Safe-delete calls pass once. The bypass inventory above is exercised and reported as out of coverage. |
-| P5 — timed purge | A default dry-run selects only active entries at least 30 days old. `--execute --yes` removes eligible payloads, appends auditable intent/completion events, is retry-safe, leaves young/restored/unknown/failing entries intact, and reports partial failure. The documented daily timer invokes the same explicit command. |
+| P4 — hook enforcement | Supported PreToolUse and shim forms route to `safe-delete add`; the original raw command never executes. Cross-device sources, unsupported/ambiguous forms, unavailable CLI, unwritable root, and CLI failure deny. Non-deletion probes pass through, safe-delete calls pass once, and the bypass inventory above is exercised and reported as out of coverage. |
+| P5 — timed purge | A default dry-run selects only active entries at least 30 days old plus recoverable `purge_pending` entries with payloads. `--execute --yes` removes eligible payloads, appends auditable intent/completion events, returns failed removals to active, retries interrupted intents after a crash, leaves young/restored/unknown/audit-failing entries intact, and reports partial failure. The documented daily timer invokes the same explicit command. |
 | P6 — full-path evidence | From a clean checkout, replay an agent deletion through hook → CLI → unified trash/ledger → list → restore and then a controlled aged-entry purge. Evidence records commit SHA, cwd, exact commands, tool/agent/session context, UTC timestamps, outputs, and artifact paths. The proof maps one-to-one to these gates and contains no product implementation change in an evidence PR. |
 
 P1 itself is complete only when the disposer confirms that one contract is
@@ -395,16 +609,22 @@ authorized before that comment.
 The existing [`docs/project/commit-plan.md`](https://github.com/Dylan5237/safe-delete-cli/blob/main/docs/project/commit-plan.md) on
 `main` remains the project’s proposed atomic plan and is subordinate to this
 Phase contract and disposer decisions. The list below **preserves every
-P2–P6 commit slice already named there** and refines it by mapping each slice
-to this document; it is not a competing product plan. Any accepted wording
-change to the shared plan will be a later docs commit after `FREEZE ACK`.
+P2–P6 commit slice already named there**, adds the missing P2-S0 surface slice,
+and refines the mapping to this document; it is not a competing product plan.
+Any accepted wording change to the shared plan will be a later docs commit
+after `FREEZE ACK`.
 
 ### P2 — CLI + minimum ledger + restore (Issue #4)
 
+0. `feat: add CLI surface + ledger bootstrap` (P2-S0) — owns command dispatch,
+   `init`, `list` (including `--orphans`), `show`, `version`, the shared
+   `--root`/`--json` envelope, reserved exit categories, and the frozen error
+   vocabulary. It also owns the initial ledger/object audit scan. Commands
+   reserved for P4/P5 return `unsupported_command` until their phase.
 1. `feat: add unified trash move primitive` — §§ CLI behavior, Storage layout,
    identity/collision, and same-filesystem failure semantics.
-2. `feat: add minimum ledger writer` — §§ Ledger versioning, P2 fields, and
-   durable JSONL append rules.
+2. `feat: add minimum ledger writer` — §§ Ledger versioning, P2 fields,
+   lifecycle replay, audit preflight, and durable JSONL append rules.
 3. `feat: add restore command` — § Restore semantics and collision behavior.
 4. `test: cover cli ledger and restore contract` — P2 acceptance gate above;
    proof artifacts remain separate from implementation.
