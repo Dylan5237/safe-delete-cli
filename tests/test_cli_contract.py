@@ -37,6 +37,35 @@ def run_cli(root: Path, *arguments: str) -> tuple[int, dict[str, object]]:
     return completed.returncode, payload
 
 
+def run_cli_at(
+    root: Path,
+    cwd: Path,
+    *arguments: str,
+    env: dict[str, str] | None = None,
+    clear_env: tuple[str, ...] = (),
+) -> tuple[int, dict[str, object]]:
+    environment = os.environ.copy()
+    for name in clear_env:
+        environment.pop(name, None)
+    if env:
+        environment.update(env)
+    completed = subprocess.run(
+        [sys.executable, str(CLI), "--root", str(root), "--json", *arguments],
+        cwd=cwd,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:  # pragma: no cover - useful failure detail
+        raise AssertionError(
+            f"CLI did not emit JSON\nstdout={completed.stdout!r}\nstderr={completed.stderr!r}"
+        ) from exc
+    return completed.returncode, payload
+
+
 class CliContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory(prefix="safe-delete-test-")
@@ -120,11 +149,22 @@ class CliContractTests(unittest.TestCase):
                     "trashed_path",
                     "kind",
                     "timestamp",
+                    "project",
+                    "session_id",
+                    "reason",
+                    "agent",
+                    "tool",
                 },
             )
             self.assertEqual(record["schema_version"], 1)
             self.assertEqual(record["operation"], "trash")
             self.assertEqual(record["state"], "active")
+            self.assertIsNone(record["session_id"])
+            self.assertIsNone(record["reason"])
+            self.assertIsNone(record["agent"])
+            self.assertEqual(record["tool"], "safe-delete-cli")
+            self.assertEqual(record["project"], str(REPOSITORY_ROOT))
+            self.assertNotIn("extensions", record)
             self.assertEqual(str(uuid.UUID(record["event_id"])), record["event_id"])
 
         code, list_payload = run_cli(self.storage, "list")
@@ -154,6 +194,343 @@ class CliContractTests(unittest.TestCase):
         code, normal_payload = run_cli(self.storage, "list")
         self.assertEqual(code, 4, normal_payload)
         self.assertEqual(normal_payload["errors"][0]["code"], "orphan_payload")
+
+    def test_p3_add_json_round_trips_all_rich_metadata_and_project_filter(self) -> None:
+        self.init_storage()
+        source = self.workspace / "rich.txt"
+        source.write_text("rich", encoding="utf-8")
+        real_project = Path(self.temp_dir.name) / "project-real"
+        real_project.mkdir()
+        project_alias = Path(self.temp_dir.name) / "project-alias"
+        project_alias.symlink_to(real_project, target_is_directory=True)
+        project_value = project_alias / "repo"
+        expected_project = real_project / "repo"
+        extensions = {
+            "vendor": {"trace_id": "trace-7"},
+            "unknown": {"nested": [1, True, None]},
+        }
+
+        code, added = run_cli_at(
+            self.storage,
+            Path(self.temp_dir.name),
+            "add",
+            "--project",
+            str(project_value),
+            "--session-id",
+            "sess-123",
+            "--reason",
+            "remove generated artifact",
+            "--agent",
+            "codex/luna",
+            "--tool",
+            "pretooluse:shell",
+            "--extensions",
+            json.dumps(extensions, separators=(",", ":")),
+            "--",
+            str(source),
+            clear_env=(
+                "SAFE_DELETE_PROJECT",
+                "SAFE_DELETE_SESSION_ID",
+                "SAFE_DELETE_AGENT",
+            ),
+        )
+        self.assertEqual(code, 0, added)
+        result = added["results"][0]
+        expected_rich = {
+            "project": str(expected_project),
+            "session_id": "sess-123",
+            "reason": "remove generated artifact",
+            "agent": "codex/luna",
+            "tool": "pretooluse:shell",
+            "extensions": extensions,
+        }
+        for field_name, expected in expected_rich.items():
+            self.assertEqual(result[field_name], expected)
+
+        raw_line = (self.storage / "ledger.jsonl").read_bytes()
+        record = json.loads(raw_line)
+        self.assertEqual({field: record[field] for field in expected_rich if field != "extensions"}, {
+            field: expected_rich[field] for field in expected_rich if field != "extensions"
+        })
+        self.assertEqual(record["extensions"], extensions)
+
+        code, listed = run_cli_at(
+            self.storage,
+            Path(self.temp_dir.name),
+            "list",
+            "--project",
+            str(project_alias / "repo"),
+        )
+        self.assertEqual(code, 0, listed)
+        self.assertEqual(listed["results"][0]["extensions"], extensions)
+        self.assertEqual(listed["results"][0]["project"], str(expected_project))
+
+        entry_id = result["entry_id"]
+        code, shown = run_cli_at(
+            self.storage,
+            Path(self.temp_dir.name),
+            "show",
+            entry_id,
+        )
+        self.assertEqual(code, 0, shown)
+        self.assertEqual(shown["results"][0]["creation"]["extensions"], extensions)
+        self.assertEqual(shown["results"][0]["events"][0]["tool"], "pretooluse:shell")
+        self.assertEqual((self.storage / "ledger.jsonl").read_bytes(), raw_line)
+
+    def test_p3_context_absence_does_not_fabricate_identity(self) -> None:
+        self.init_storage()
+        source = self.workspace / "no-context.txt"
+        source.write_text("content", encoding="utf-8")
+        clear_env = (
+            "SAFE_DELETE_PROJECT",
+            "SAFE_DELETE_SESSION_ID",
+            "SAFE_DELETE_AGENT",
+        )
+        code, payload = run_cli_at(
+            self.storage,
+            Path(self.temp_dir.name),
+            "add",
+            "--",
+            str(source),
+            clear_env=clear_env,
+        )
+        self.assertEqual(code, 0, payload)
+        result = payload["results"][0]
+        # A surrounding checkout marker (for example /tmp/.git in the test
+        # runner) is an allowed detected project root; the source path itself
+        # must never be used as a fabricated project identity.
+        self.assertNotEqual(result["project"], str(self.workspace))
+        self.assertIsNone(result["session_id"])
+        self.assertIsNone(result["reason"])
+        self.assertIsNone(result["agent"])
+        self.assertEqual(result["tool"], "safe-delete-cli")
+        self.assertIsNone(result["extensions"])
+        record = json.loads((self.storage / "ledger.jsonl").read_text(encoding="utf-8"))
+        self.assertNotIn("extensions", record)
+
+    def test_p3_flags_override_hook_and_environment_fixtures(self) -> None:
+        self.init_storage()
+        source = self.workspace / "precedence.txt"
+        source.write_text("content", encoding="utf-8")
+        import safe_delete.cli as cli
+
+        hook = {
+            "project": str(self.workspace / "hook-project"),
+            "session_id": "hook-session",
+            "reason": "hook reason",
+            "agent": "hook-agent",
+            "tool": "hook-tool",
+            "extensions": {"hook": True},
+        }
+        flags = Namespace(
+            root=str(self.storage),
+            paths=[str(source)],
+            dry_run=False,
+            project=str(self.workspace / "flag-project"),
+            session_id="flag-session",
+            reason="flag reason",
+            agent="flag-agent",
+            tool="flag-tool",
+            extensions='{"flag":true}',
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "SAFE_DELETE_PROJECT": str(self.workspace / "env-project"),
+                "SAFE_DELETE_SESSION_ID": "env-session",
+                "SAFE_DELETE_AGENT": "env-agent",
+            },
+        ):
+            results, errors = cli._handle_add(flags, hook_context=hook)
+        self.assertEqual(errors, [])
+        self.assertEqual(results[0]["project"], str(self.workspace / "flag-project"))
+        self.assertEqual(results[0]["session_id"], "flag-session")
+        self.assertEqual(results[0]["reason"], "flag reason")
+        self.assertEqual(results[0]["agent"], "flag-agent")
+        self.assertEqual(results[0]["tool"], "flag-tool")
+        self.assertEqual(results[0]["extensions"], {"flag": True})
+
+        fallback_args = Namespace(
+            root=str(self.storage),
+            project=None,
+            session_id=None,
+            reason=None,
+            agent=None,
+            tool=None,
+            extensions=None,
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "SAFE_DELETE_PROJECT": str(self.workspace / "env-project"),
+                "SAFE_DELETE_SESSION_ID": "env-session",
+                "SAFE_DELETE_AGENT": "env-agent",
+            },
+        ):
+            metadata = cli.resolve_metadata(
+                fallback_args,
+                hook_context={"reason": "hook reason"},
+                invocation_dir=self.temp_dir.name,
+            )
+        self.assertEqual(metadata.project, str(self.workspace / "env-project"))
+        self.assertEqual(metadata.session_id, "env-session")
+        self.assertEqual(metadata.reason, "hook reason")
+        self.assertEqual(metadata.agent, "env-agent")
+        self.assertEqual(metadata.tool, "safe-delete-cli")
+        self.assertIsNone(metadata.extensions)
+
+    def test_p3_dry_run_resolves_all_rich_fields_without_mutation(self) -> None:
+        self.init_storage()
+        source = self.workspace / "dry-run.txt"
+        source.write_text("dry", encoding="utf-8")
+        extensions = {"dry": {"nested": "value"}}
+        code, payload = run_cli_at(
+            self.storage,
+            Path(self.temp_dir.name),
+            "add",
+            "--dry-run",
+            "--project",
+            str(self.workspace / "project"),
+            "--session-id",
+            "dry-session",
+            "--reason",
+            "preview",
+            "--agent",
+            "dry-agent",
+            "--tool",
+            "dry-tool",
+            "--extensions",
+            json.dumps(extensions),
+            "--",
+            str(source),
+        )
+        self.assertEqual(code, 0, payload)
+        result = payload["results"][0]
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(result["extensions"], extensions)
+        for field_name in ("project", "session_id", "reason", "agent", "tool"):
+            self.assertIn(field_name, result)
+        self.assertTrue(source.is_file())
+        self.assertEqual((self.storage / "ledger.jsonl").read_text(encoding="utf-8"), "")
+
+    def test_p3_invalid_metadata_is_rejected_before_move_or_append(self) -> None:
+        cases = [
+            ("non-object", "--extensions", "[]"),
+            ("duplicate", "--extensions", '{"a":1,"a":2}'),
+            ("non-finite", "--extensions", '{"a":NaN}'),
+            ("nul", "--extensions", '{"a":"\\u0000"}'),
+            ("oversize-extension", "--extensions", json.dumps({"a": "x" * 17000})),
+            ("oversize-session", "--session-id", "x" * 257),
+        ]
+        for name, option, value in cases:
+            with self.subTest(name=name):
+                storage = Path(self.temp_dir.name) / f"storage-{name}"
+                source = self.workspace / f"{name}.txt"
+                source.write_text("must stay", encoding="utf-8")
+                code, payload = run_cli_at(
+                    storage,
+                    Path(self.temp_dir.name),
+                    "add",
+                    option,
+                    value,
+                    "--",
+                    str(source),
+                    env={"SAFE_DELETE_SESSION_ID": "fallback"},
+                )
+                self.assertEqual(code, 2, payload)
+                self.assertEqual(payload["errors"][0]["code"], "usage_error")
+                self.assertTrue(source.is_file())
+                self.assertFalse((storage / "ledger.jsonl").exists())
+                source.unlink()
+
+        self.init_storage()
+        source = self.workspace / "invalid-type.txt"
+        source.write_text("must stay", encoding="utf-8")
+        import safe_delete.cli as cli
+
+        args = Namespace(
+            root=str(self.storage),
+            paths=[str(source)],
+            dry_run=False,
+            project=None,
+            session_id=123,
+            reason="bad\x00reason",
+            agent=None,
+            tool=None,
+            extensions=None,
+        )
+        results, errors = cli._handle_add(args)
+        self.assertEqual(results[0]["error"]["code"], "usage_error")
+        self.assertEqual(errors[0].code, "usage_error")
+        self.assertTrue(source.is_file())
+        self.assertEqual((self.storage / "ledger.jsonl").read_text(encoding="utf-8"), "")
+
+    def test_p3_legacy_fixture_projects_null_without_rewriting_and_restores(self) -> None:
+        self.init_storage()
+        entry_id = "550e8400-e29b-41d4-a716-446655440000"
+        event_id = "6ba7b810-9dad-41d1-80b4-00c04fd430c8"
+        original = self.workspace / "legacy.txt"
+        payload = self.storage / "trash" / "objects" / entry_id / "payload"
+        payload.parent.mkdir()
+        payload.write_text("legacy payload", encoding="utf-8")
+        legacy_record = {
+            "schema_version": 1,
+            "event_id": event_id,
+            "entry_id": entry_id,
+            "operation": "trash",
+            "state": "active",
+            "original_path": str(original),
+            "trashed_path": str(payload),
+            "kind": "file",
+            "timestamp": "2026-09-16T07:00:00Z",
+        }
+        legacy_line = (json.dumps(legacy_record, separators=(",", ":")) + "\n").encode()
+        ledger = self.storage / "ledger.jsonl"
+        ledger.write_bytes(legacy_line)
+
+        code, listed = run_cli_at(self.storage, Path(self.temp_dir.name), "list")
+        self.assertEqual(code, 0, listed)
+        listed_result = listed["results"][0]
+        for field_name in ("project", "session_id", "reason", "agent", "extensions"):
+            self.assertIsNone(listed_result[field_name])
+        self.assertIsNone(listed_result["tool"])
+        self.assertEqual(ledger.read_bytes(), legacy_line)
+
+        code, shown = run_cli_at(
+            self.storage,
+            Path(self.temp_dir.name),
+            "show",
+            entry_id,
+        )
+        self.assertEqual(code, 0, shown)
+        creation = shown["results"][0]["creation"]
+        self.assertIsNone(creation["extensions"])
+        self.assertIsNone(creation["project"])
+        self.assertEqual(ledger.read_bytes(), legacy_line)
+
+        code, restored = run_cli_at(
+            self.storage,
+            Path(self.temp_dir.name),
+            "restore",
+            entry_id,
+        )
+        self.assertEqual(code, 0, restored)
+        self.assertEqual(original.read_text(encoding="utf-8"), "legacy payload")
+        self.assertTrue(ledger.read_bytes().startswith(legacy_line))
+        restored_record = json.loads(ledger.read_bytes().splitlines()[1])
+        self.assertEqual(restored_record["operation"], "restore")
+        self.assertNotIn("extensions", restored_record)
+        for field_name in ("project", "session_id", "reason", "agent", "tool"):
+            self.assertIsNone(restored_record[field_name])
+
+        code, all_entries = run_cli_at(
+            self.storage,
+            Path(self.temp_dir.name),
+            "list",
+            "--all",
+        )
+        self.assertEqual(code, 0, all_entries)
+        self.assertEqual(all_entries["results"][0]["state"], "restored")
 
     def test_orphan_listing_preserves_ledger_failure_during_reconciliation(self) -> None:
         self.init_storage()
