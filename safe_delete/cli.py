@@ -116,15 +116,20 @@ def _print_human(envelope: dict[str, Any]) -> None:
             f"safe-delete: {item['code']}: {item['message']}",
             file=sys.stderr,
         )
-        if item["code"] in {"rollback_failed", "orphan_payload"}:
-            source = (
-                item.get("source")
-                or item.get("restore_path")
-                or item.get("original_path")
-                or "<not recorded>"
+        has_transaction_paths = (
+            item["code"] in {"rollback_failed", "orphan_payload"}
+            or (
+                "trashed_path" in item
+                and ("source" in item or "restore_path" in item)
             )
+        )
+        if has_transaction_paths:
             trash = item.get("trashed_path") or item.get("trash_path") or "<not recorded>"
-            print(f"  source path: {source}", file=sys.stderr)
+            if "restore_path" in item:
+                print(f"  restore path: {item['restore_path']}", file=sys.stderr)
+            else:
+                source = item.get("source") or item.get("original_path") or "<not recorded>"
+                print(f"  source path: {source}", file=sys.stderr)
             print(f"  trash path: {trash}", file=sys.stderr)
 
 
@@ -182,8 +187,6 @@ def _handle_list(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteEr
                 continue
             results.append(_entry_result(entry))
     audit_errors = _audit_errors_for_list(report)
-    if args.orphans:
-        audit_errors = [item for item in audit_errors if item.code == "orphan_payload"]
     return results, audit_errors
 
 
@@ -276,100 +279,139 @@ def _failed_input_result(path: str, exc: SafeDeleteError) -> dict[str, Any]:
 
 
 def _handle_add(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
-    layout = initialize_layout(args.root)
     results: list[Any] = []
     errors: list[SafeDeleteError] = []
-    with ledger_lock(layout, exclusive=True):
-        audit = audit_layout(layout)
-        if audit.errors:
-            errors = list(audit.errors)
-            if args.paths:
+    try:
+        layout = initialize_layout(args.root)
+    except SafeDeleteError as exc:
+        return [
+            _failed_input_result(raw_path, _with_path(exc, raw_path))
+            for raw_path in args.paths
+        ], [exc]
+    except OSError as exc:
+        failure = error("storage_failure", str(exc))
+        return [
+            _failed_input_result(raw_path, _with_path(failure, raw_path))
+            for raw_path in args.paths
+        ], [failure]
+
+    failed_inputs = 0
+    succeeded_inputs = 0
+    try:
+        with ledger_lock(layout, exclusive=True):
+            audit = audit_layout(layout)
+            if audit.errors:
+                errors = list(audit.errors)
                 representative = errors[0]
                 return [
                     _failed_input_result(raw_path, representative)
                     for raw_path in args.paths
                 ], errors
 
-        failed_inputs = 0
-        for raw_path in args.paths:
-            try:
-                original_path = normalized_path(raw_path)
-                ensure_safe_target(layout, original_path)
-                source = inspect_source(layout, original_path)
-                if not same_filesystem(original_path, layout.objects):
-                    raise error(
-                        "cross_device",
-                        "source and trash objects are on different filesystems",
-                        source=original_path,
-                        destination=str(layout.objects),
+            for raw_path in args.paths:
+                try:
+                    original_path = normalized_path(raw_path)
+                    ensure_safe_target(layout, original_path)
+                    source = inspect_source(layout, original_path)
+                    if not same_filesystem(original_path, layout.objects):
+                        raise error(
+                            "cross_device",
+                            "source and trash objects are on different filesystems",
+                            source=original_path,
+                            destination=str(layout.objects),
+                        )
+                    if args.dry_run:
+                        results.append(
+                            {
+                                "path": original_path,
+                                "original_path": original_path,
+                                "kind": source.kind,
+                                "dry_run": True,
+                            }
+                        )
+                        succeeded_inputs += 1
+                        continue
+
+                    entry_id, object_directory = create_entry_directory(layout)
+                    payload_path = layout.payload(entry_id)
+                    try:
+                        atomic_move(
+                            original_path,
+                            payload_path,
+                            destination_error_code="entry_id_collision",
+                            expected_source_stat=source.stat,
+                            expected_source_kind=source.kind,
+                        )
+                    except SafeDeleteError as move_error:
+                        try:
+                            remove_empty_object_directory(object_directory)
+                        except SafeDeleteError as cleanup_error:
+                            raise cleanup_error from move_error
+                        raise move_error
+
+                    record = build_trash_record(
+                        entry_id=entry_id,
+                        original_path=original_path,
+                        trashed_path=str(payload_path),
+                        kind=source.kind,
                     )
-                if args.dry_run:
+                    try:
+                        append_event(layout, record)
+                    except SafeDeleteError as append_error:
+                        rollback_error = _rollback_trash_move(
+                            source_path=original_path,
+                            payload_path=str(payload_path),
+                            object_directory=object_directory,
+                            append_error=append_error,
+                        )
+                        errors.append(rollback_error)
+                        results.append(_failed_input_result(raw_path, rollback_error))
+                        failed_inputs += 1
+                        continue
                     results.append(
                         {
+                            "entry_id": entry_id,
                             "path": original_path,
                             "original_path": original_path,
+                            "trashed_path": str(payload_path),
                             "kind": source.kind,
-                            "dry_run": True,
+                            "state": "active",
                         }
                     )
-                    continue
-
-                entry_id, object_directory = create_entry_directory(layout)
-                payload_path = layout.payload(entry_id)
-                try:
-                    atomic_move(
-                        original_path,
-                        payload_path,
-                        destination_error_code="entry_id_collision",
-                    )
-                except SafeDeleteError as move_error:
-                    try:
-                        remove_empty_object_directory(object_directory)
-                    except SafeDeleteError as cleanup_error:
-                        raise cleanup_error from move_error
-                    raise move_error
-
-                record = build_trash_record(
-                    entry_id=entry_id,
-                    original_path=original_path,
-                    trashed_path=str(payload_path),
-                    kind=source.kind,
-                )
-                try:
-                    append_event(layout, record)
-                except SafeDeleteError as append_error:
-                    rollback_error = _rollback_trash_move(
-                        source_path=original_path,
-                        payload_path=str(payload_path),
-                        object_directory=object_directory,
-                        append_error=append_error,
-                    )
-                    errors.append(rollback_error)
-                    results.append(_failed_input_result(raw_path, rollback_error))
+                    succeeded_inputs += 1
+                except SafeDeleteError as exc:
+                    exc = _with_path(exc, raw_path)
+                    errors.append(exc)
+                    results.append(_failed_input_result(raw_path, exc))
                     failed_inputs += 1
-                    continue
-                results.append(
-                    {
-                        "entry_id": entry_id,
-                        "path": original_path,
-                        "original_path": original_path,
-                        "trashed_path": str(payload_path),
-                        "kind": source.kind,
-                        "state": "active",
-                    }
-                )
-            except SafeDeleteError as exc:
-                exc = _with_path(exc, raw_path)
-                errors.append(exc)
-                results.append(_failed_input_result(raw_path, exc))
-                failed_inputs += 1
+    except SafeDeleteError as exc:
+        if not results:
+            return [
+                _failed_input_result(raw_path, _with_path(exc, raw_path))
+                for raw_path in args.paths
+            ], [exc]
+        errors.append(exc)
+        for raw_path in args.paths[len(results):]:
+            results.append(_failed_input_result(raw_path, _with_path(exc, raw_path)))
+            failed_inputs += 1
+    except OSError as exc:
+        failure = error("storage_failure", str(exc))
+        if not results:
+            return [
+                _failed_input_result(raw_path, _with_path(failure, raw_path))
+                for raw_path in args.paths
+            ], [failure]
+        errors.append(failure)
+        for raw_path in args.paths[len(results):]:
+            results.append(_failed_input_result(raw_path, _with_path(failure, raw_path)))
+            failed_inputs += 1
 
-    if results and failed_inputs and failed_inputs < len(args.paths):
+    if succeeded_inputs and failed_inputs:
         errors.append(
             error(
                 "partial_failure",
                 "one or more add inputs failed after independent processing",
-                succeeded=len(results),
+                succeeded=succeeded_inputs,
                 failed=failed_inputs,
             )
         )
@@ -379,8 +421,14 @@ def _handle_add(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteErr
 def _handle_restore(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
     if not is_uuid4(args.entry_id):
         return [], [error("usage_error", "entry_id must be a canonical UUID v4", entry_id=args.entry_id)]
+    if args.restore_to is not None and args.restore_to == "":
+        return [], [error("usage_error", "restore destination must not be empty")]
     layout = require_layout(args.root)
-    destination = normalized_path(args.restore_to, field_name="restore destination") if args.restore_to else None
+    destination = (
+        normalized_path(args.restore_to, field_name="restore destination")
+        if args.restore_to is not None
+        else None
+    )
     with ledger_lock(layout, exclusive=True):
         report = audit_layout(layout)
         if report.errors:

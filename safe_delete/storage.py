@@ -83,6 +83,41 @@ def layout_for(explicit_root: str | None = None) -> Layout:
     )
 
 
+def open_directory_without_symlinks(path: Path) -> int:
+    """Open an absolute directory through stable, no-follow descriptors."""
+
+    normalized = os.path.normpath(os.fspath(path))
+    if not os.path.isabs(normalized):
+        raise error(
+            "storage_failure",
+            f"storage directory must be absolute: {path}",
+            path=str(path),
+        )
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    if not nofollow or not directory:
+        raise error(
+            "storage_failure",
+            "safe directory descriptors are unavailable on this platform",
+            path=str(path),
+        )
+
+    fd = os.open(os.sep, os.O_RDONLY | directory)
+    try:
+        for component in Path(normalized).parts[1:]:
+            next_fd = os.open(
+                component,
+                os.O_RDONLY | directory | nofollow,
+                dir_fd=fd,
+            )
+            os.close(fd)
+            fd = next_fd
+        return fd
+    except OSError:
+        os.close(fd)
+        raise
+
+
 def _lstat(path: Path) -> os.stat_result:
     try:
         return os.lstat(path)
@@ -152,34 +187,49 @@ def _require_directory(path: Path) -> None:
 def _ensure_regular_file(path: Path) -> bool:
     """Ensure a non-symlink regular file exists; return whether it was created."""
 
+    parent_fd = None
+    fd = None
     try:
-        st = os.lstat(path)
-    except FileNotFoundError:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        parent_fd = open_directory_without_symlinks(path.parent)
         try:
-            fd = os.open(path, flags, 0o600)
-        except FileExistsError:
-            st = _lstat(path)
+            st = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            try:
+                fd = os.open(
+                    path.name,
+                    flags | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+            except FileExistsError:
+                try:
+                    st = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+                except OSError as exc:
+                    raise error(
+                        "storage_failure",
+                        f"cannot inspect storage file after a race: {path}",
+                        path=str(path),
+                        errno=exc.errno,
+                    ) from exc
+            else:
+                try:
+                    os.fsync(fd)
+                except OSError as exc:
+                    raise error(
+                        "storage_failure",
+                        f"cannot flush storage file: {path}",
+                        path=str(path),
+                        errno=exc.errno,
+                    ) from exc
+                return True
         except OSError as exc:
             raise error(
                 "storage_failure",
-                f"cannot create storage file: {path}",
+                f"cannot inspect storage file: {path}",
                 path=str(path),
                 errno=exc.errno,
             ) from exc
-        else:
-            try:
-                os.fsync(fd)
-            except OSError as exc:
-                raise error(
-                    "storage_failure",
-                    f"cannot flush storage file: {path}",
-                    path=str(path),
-                    errno=exc.errno,
-                ) from exc
-            finally:
-                os.close(fd)
-            return True
     except OSError as exc:
         raise error(
             "storage_failure",
@@ -187,6 +237,11 @@ def _ensure_regular_file(path: Path) -> bool:
             path=str(path),
             errno=exc.errno,
         ) from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if parent_fd is not None:
+            os.close(parent_fd)
 
     if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
         raise error(
@@ -392,19 +447,48 @@ def kind_for(path: str | Path, st: os.stat_result | None = None) -> str:
 def ledger_lock(layout: Layout, *, exclusive: bool) -> Iterator[int]:
     """Hold the OS flock for the whole audit/move/append transaction."""
 
-    try:
-        fd = os.open(layout.lock, os.O_RDWR)
-    except OSError as exc:
-        raise error(
-            "ledger_failure",
-            f"cannot open ledger lock: {layout.lock}",
-            path=str(layout.lock),
-            errno=exc.errno,
-        ) from exc
-    operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    parent_fd = None
+    fd = None
+    locked = False
     try:
         try:
+            parent_fd = open_directory_without_symlinks(layout.lock.parent)
+            fd = os.open(
+                layout.lock.name,
+                os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+            descriptor_stat = os.fstat(fd)
+            if not stat.S_ISREG(descriptor_stat.st_mode):
+                raise error(
+                    "ledger_failure",
+                    f"ledger lock is not a regular file: {layout.lock}",
+                    path=str(layout.lock),
+                )
+            path_stat = os.stat(layout.lock.name, dir_fd=parent_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(path_stat.st_mode)
+                or path_stat.st_dev != descriptor_stat.st_dev
+                or path_stat.st_ino != descriptor_stat.st_ino
+            ):
+                raise error(
+                    "ledger_failure",
+                    f"ledger lock changed while opening: {layout.lock}",
+                    path=str(layout.lock),
+                )
+        except SafeDeleteError:
+            raise
+        except OSError as exc:
+            raise error(
+                "ledger_failure",
+                f"cannot open ledger lock: {layout.lock}",
+                path=str(layout.lock),
+                errno=exc.errno,
+            ) from exc
+        operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        try:
             fcntl.flock(fd, operation)
+            locked = True
         except OSError as exc:
             raise error(
                 "ledger_failure",
@@ -412,12 +496,38 @@ def ledger_lock(layout: Layout, *, exclusive: bool) -> Iterator[int]:
                 path=str(layout.lock),
                 errno=exc.errno,
             ) from exc
+        try:
+            path_stat = os.stat(layout.lock.name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise error(
+                "ledger_failure",
+                f"cannot verify ledger lock after locking: {layout.lock}",
+                path=str(layout.lock),
+                errno=exc.errno,
+            ) from exc
+        if (
+            not stat.S_ISREG(path_stat.st_mode)
+            or path_stat.st_dev != descriptor_stat.st_dev
+            or path_stat.st_ino != descriptor_stat.st_ino
+        ):
+            raise error(
+                "ledger_failure",
+                f"ledger lock was replaced while locking: {layout.lock}",
+                path=str(layout.lock),
+            )
         yield fd
     finally:
         try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            if locked and fd is not None:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(fd)
+            elif fd is not None:
+                os.close(fd)
         finally:
-            os.close(fd)
+            if parent_fd is not None:
+                os.close(parent_fd)
 
 
 def same_filesystem(first: str | Path, second: str | Path) -> bool:

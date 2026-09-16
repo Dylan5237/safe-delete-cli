@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import datetime as _datetime
-import errno
 import json
 import os
+import stat
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import SafeDeleteError, error
-from .storage import Layout, kind_for
+from .storage import Layout, kind_for, open_directory_without_symlinks
 
 
 @dataclass(frozen=True)
@@ -130,21 +130,81 @@ def _ledger_failure(message: str, path: Path, exc: OSError | None = None) -> Saf
     return error("ledger_failure", message, **details)
 
 
-def _sync_parent_directory(path: Path) -> None:
+def _open_ledger_parent(layout: Layout) -> int:
     try:
-        fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    except OSError as exc:
-        raise _ledger_failure(
-            f"cannot open ledger directory for durability: {path.parent}", path, exc
+        return open_directory_without_symlinks(layout.ledger.parent)
+    except SafeDeleteError as exc:
+        raise error(
+            "ledger_failure",
+            f"cannot open ledger directory: {layout.ledger.parent}",
+            path=str(layout.ledger),
+            cause=exc.code,
         ) from exc
+    except OSError as exc:
+        raise _ledger_failure(f"cannot open ledger directory: {layout.ledger.parent}", layout.ledger, exc) from exc
+
+
+def _verify_ledger_descriptor(
+    fd: int,
+    parent_fd: int,
+    path: Path,
+    descriptor_stat: os.stat_result | None = None,
+) -> os.stat_result:
     try:
-        os.fsync(fd)
+        descriptor_stat = descriptor_stat or os.fstat(fd)
+        path_stat = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
     except OSError as exc:
-        raise _ledger_failure(
-            f"cannot flush ledger directory: {path.parent}", path, exc
-        ) from exc
+        raise _ledger_failure(f"cannot verify ledger descriptor: {path}", path, exc) from exc
+    if not stat.S_ISREG(descriptor_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
+        raise _ledger_failure(f"ledger is not a regular file: {path}", path)
+    if (
+        descriptor_stat.st_dev != path_stat.st_dev
+        or descriptor_stat.st_ino != path_stat.st_ino
+    ):
+        raise _ledger_failure(f"ledger was replaced while it was open: {path}", path)
+    return descriptor_stat
+
+
+def _sync_parent_directory_fd(parent_fd: int, path: Path) -> None:
+    try:
+        os.fsync(parent_fd)
+    except OSError as exc:
+        raise _ledger_failure(f"cannot flush ledger directory: {path.parent}", path, exc) from exc
+
+
+def read_ledger_lines(layout: Layout) -> list[str]:
+    """Read the ledger through a verified descriptor, never a replaced path."""
+
+    parent_fd = _open_ledger_parent(layout)
+    fd = None
+    try:
+        try:
+            fd = os.open(
+                layout.ledger.name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            raise _ledger_failure(f"cannot open ledger for read: {layout.ledger}", layout.ledger, exc) from exc
+        descriptor_stat = _verify_ledger_descriptor(fd, parent_fd, layout.ledger)
+        chunks: list[bytes] = []
+        while True:
+            try:
+                chunk = os.read(fd, 1024 * 1024)
+            except OSError as exc:
+                raise _ledger_failure(f"cannot read ledger: {layout.ledger}", layout.ledger, exc) from exc
+            if not chunk:
+                break
+            chunks.append(chunk)
+        _verify_ledger_descriptor(fd, parent_fd, layout.ledger, descriptor_stat)
+        try:
+            return b"".join(chunks).decode("utf-8").splitlines(keepends=True)
+        except UnicodeDecodeError:
+            raise
     finally:
-        os.close(fd)
+        if fd is not None:
+            os.close(fd)
+        os.close(parent_fd)
 
 
 def append_event(layout: Layout, record: dict[str, object]) -> None:
@@ -163,12 +223,19 @@ def append_event(layout: Layout, record: dict[str, object]) -> None:
     except (TypeError, ValueError, UnicodeEncodeError) as exc:
         raise _ledger_failure("cannot encode ledger event as UTF-8 JSON", layout.ledger) from exc
 
-    try:
-        fd = os.open(layout.ledger, os.O_RDWR | os.O_APPEND)
-    except OSError as exc:
-        raise _ledger_failure(f"cannot open ledger for append: {layout.ledger}", layout.ledger, exc) from exc
+    parent_fd = _open_ledger_parent(layout)
+    fd = None
 
     try:
+        try:
+            fd = os.open(
+                layout.ledger.name,
+                os.O_RDWR | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            raise _ledger_failure(f"cannot open ledger for append: {layout.ledger}", layout.ledger, exc) from exc
+        descriptor_stat = _verify_ledger_descriptor(fd, parent_fd, layout.ledger)
         # A hand-written or interrupted JSONL line may be valid JSON but lack
         # its final delimiter.  Add the separator as part of this append so
         # the new event can never be glued to the preceding object.
@@ -197,12 +264,15 @@ def append_event(layout: Layout, record: dict[str, object]) -> None:
             os.fsync(fd)
         except OSError as exc:
             raise _ledger_failure(f"cannot flush ledger event: {layout.ledger}", layout.ledger, exc) from exc
+        _verify_ledger_descriptor(fd, parent_fd, layout.ledger, descriptor_stat)
+        _sync_parent_directory_fd(parent_fd, layout.ledger)
     finally:
-        try:
-            os.close(fd)
-        except OSError as exc:
-            raise _ledger_failure(f"cannot close ledger after append: {layout.ledger}", layout.ledger, exc) from exc
-    _sync_parent_directory(layout.ledger)
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError as exc:
+                raise _ledger_failure(f"cannot close ledger after append: {layout.ledger}", layout.ledger, exc) from exc
+        os.close(parent_fd)
 
 
 def remove_empty_object_directory(object_directory: Path) -> None:

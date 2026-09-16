@@ -10,12 +10,15 @@ import sys
 from pathlib import Path
 
 from .errors import SafeDeleteError, error
-from .storage import is_exdev
+from .storage import is_exdev, open_directory_without_symlinks
 
 
-_AT_FDCWD = -100
 _RENAME_NOREPLACE = 1
 _NO_REPLACE_UNAVAILABLE = object()
+
+# Kept as a module-level alias for callers/tests that exercise the move
+# primitive directly; the implementation lives with the other storage helpers.
+_open_directory_without_symlinks = open_directory_without_symlinks
 
 
 def _renameat2_noreplace(
@@ -26,8 +29,8 @@ def _renameat2_noreplace(
 ) -> bool | object:
     """Use Linux's atomic no-replace rename when libc exposes it.
 
-    ``False`` means the host has no usable primitive and the caller may use the
-    documented residual-check fallback. Any real filesystem error is raised.
+    The unavailable sentinel means the caller must fail closed. Any real
+    filesystem error is raised.
     """
 
     if not sys.platform.startswith("linux"):
@@ -61,30 +64,6 @@ def _renameat2_noreplace(
     raise OSError(saved_errno, os.strerror(saved_errno), source_name)
 
 
-def _open_directory_without_symlinks(path: Path) -> int:
-    """Open every component with O_NOFOLLOW and retain the final directory fd."""
-
-    normalized = os.path.normpath(os.fspath(path))
-    if not os.path.isabs(normalized):
-        raise error("storage_failure", f"move path must be absolute: {path}", path=str(path))
-    fd = os.open(os.sep, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        for component in Path(normalized).parts[1:]:
-            next_fd = os.open(
-                component,
-                os.O_RDONLY
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_NOFOLLOW", 0),
-                dir_fd=fd,
-            )
-            os.close(fd)
-            fd = next_fd
-        return fd
-    except OSError:
-        os.close(fd)
-        raise
-
-
 def _lstat_at(parent_fd: int, name: str) -> os.stat_result | None:
     try:
         return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
@@ -99,22 +78,34 @@ def atomic_move(
     destination: str | os.PathLike[str],
     *,
     destination_error_code: str = "destination_exists",
+    expected_source_stat: os.stat_result | None = None,
+    expected_source_kind: str | None = None,
+    source_parent_fd: int | None = None,
+    destination_parent_fd: int | None = None,
 ) -> None:
     """Move one filesystem object with no copy/delete fallback.
 
     The caller owns the ledger lock and path policy. The destination is checked
     with ``lstat`` so a dangling final symlink is still occupied. On Linux the
-    final rename uses ``renameat2(RENAME_NOREPLACE)``. Other hosts use the same
-    residual check followed by ``rename``; they still never intentionally
-    overwrite a destination.
+    final rename uses ``renameat2(RENAME_NOREPLACE)``. If that primitive is not
+    available, the operation fails closed because a portable fallback cannot
+    provide the same no-replace race guarantees for every supported kind.
+
+    When an expected source snapshot is supplied, both the pre-move source and
+    the post-move destination are checked for the same inode and kind. This
+    makes a replacement between inspection and rename a failed operation, not
+    a ledger record for an object that was never inspected.
     """
 
     source_path = Path(source)
     destination_path = Path(destination)
-    source_parent_fd = destination_parent_fd = None
+    owns_source_parent_fd = source_parent_fd is None
+    owns_destination_parent_fd = destination_parent_fd is None
     try:
-        source_parent_fd = _open_directory_without_symlinks(source_path.parent)
-        destination_parent_fd = _open_directory_without_symlinks(destination_path.parent)
+        if source_parent_fd is None:
+            source_parent_fd = _open_directory_without_symlinks(source_path.parent)
+        if destination_parent_fd is None:
+            destination_parent_fd = _open_directory_without_symlinks(destination_path.parent)
         source_stat = _lstat_at(source_parent_fd, source_path.name)
         if source_stat is None:
             raise error(
@@ -122,6 +113,29 @@ def atomic_move(
                 f"source does not exist: {source_path}",
                 path=str(source_path),
             )
+        if expected_source_stat is not None and (
+            source_stat.st_dev != expected_source_stat.st_dev
+            or source_stat.st_ino != expected_source_stat.st_ino
+        ):
+            raise error(
+                "storage_failure",
+                "source changed between inspection and atomic move",
+                source=str(source_path),
+                expected_source_device=expected_source_stat.st_dev,
+                expected_source_inode=expected_source_stat.st_ino,
+                actual_source_device=source_stat.st_dev,
+                actual_source_inode=source_stat.st_ino,
+            )
+        if expected_source_kind is not None:
+            actual_kind = _kind_for_stat(source_stat)
+            if actual_kind != expected_source_kind:
+                raise error(
+                    "storage_failure",
+                    "source kind changed between inspection and atomic move",
+                    source=str(source_path),
+                    expected_kind=expected_source_kind,
+                    actual_kind=actual_kind,
+                )
         destination_stat = _lstat_at(destination_parent_fd, destination_path.name)
         if destination_stat is not None:
             raise error(
@@ -146,41 +160,47 @@ def atomic_move(
             destination_path.name,
         )
         if result is _NO_REPLACE_UNAVAILABLE:
-            # There is no portable no-replace directory move primitive.  For
-            # regular files and symlinks, link+unlink gives an atomic,
-            # no-overwrite destination claim.  Refuse directories rather than
-            # falling back to overwrite-capable os.rename.
-            if stat.S_ISDIR(source_stat.st_mode):
+            raise error(
+                "storage_failure",
+                "safe no-replace atomic move primitive is unavailable",
+                source=str(source_path),
+                destination=str(destination_path),
+            )
+
+        if expected_source_stat is not None or expected_source_kind is not None:
+            moved_stat = _lstat_at(destination_parent_fd, destination_path.name)
+            if moved_stat is None:
                 raise error(
                     "storage_failure",
-                    "no safe no-replace move primitive is available for directories",
+                    "atomic move destination disappeared during source verification",
                     source=str(source_path),
                     destination=str(destination_path),
                 )
-            try:
-                os.link(
-                    source_path.name,
-                    destination_path.name,
-                    src_dir_fd=source_parent_fd,
-                    dst_dir_fd=destination_parent_fd,
-                    follow_symlinks=False,
+            if expected_source_stat is not None and (
+                moved_stat.st_dev != expected_source_stat.st_dev
+                or moved_stat.st_ino != expected_source_stat.st_ino
+            ):
+                raise error(
+                    "storage_failure",
+                    "atomic move moved a source replacement",
+                    source=str(source_path),
+                    destination=str(destination_path),
+                    expected_source_device=expected_source_stat.st_dev,
+                    expected_source_inode=expected_source_stat.st_ino,
+                    actual_destination_device=moved_stat.st_dev,
+                    actual_destination_inode=moved_stat.st_ino,
                 )
-            except OSError as exc:
-                if exc.errno == errno.EEXIST:
+            if expected_source_kind is not None:
+                actual_kind = _kind_for_stat(moved_stat)
+                if actual_kind != expected_source_kind:
                     raise error(
-                        destination_error_code,
-                        f"move destination already exists: {destination_path}",
-                        path=str(destination_path),
-                    ) from exc
-                raise
-            try:
-                os.unlink(source_path.name, dir_fd=source_parent_fd)
-            except OSError:
-                try:
-                    os.unlink(destination_path.name, dir_fd=destination_parent_fd)
-                except OSError:
-                    pass
-                raise
+                        "storage_failure",
+                        "atomic move moved a source replacement kind",
+                        source=str(source_path),
+                        destination=str(destination_path),
+                        expected_kind=expected_source_kind,
+                        actual_kind=actual_kind,
+                    )
     except SafeDeleteError:
         raise
     except OSError as exc:
@@ -211,7 +231,17 @@ def atomic_move(
             errno=exc.errno,
         ) from exc
     finally:
-        if source_parent_fd is not None:
+        if owns_source_parent_fd and source_parent_fd is not None:
             os.close(source_parent_fd)
-        if destination_parent_fd is not None:
+        if owns_destination_parent_fd and destination_parent_fd is not None:
             os.close(destination_parent_fd)
+
+
+def _kind_for_stat(source_stat: os.stat_result) -> str | None:
+    if stat.S_ISREG(source_stat.st_mode):
+        return "file"
+    if stat.S_ISDIR(source_stat.st_mode):
+        return "directory"
+    if stat.S_ISLNK(source_stat.st_mode):
+        return "symlink"
+    return None

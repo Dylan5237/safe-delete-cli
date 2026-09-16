@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .errors import SafeDeleteError, error
+from .ledger import read_ledger_lines
 from .storage import Layout, ensure_safe_target, has_entry, kind_for, normalized_path
 
 
@@ -252,6 +253,12 @@ def _validate_record(record: Any, layout: Layout, line_number: int) -> dict[str,
                 "restore records must be restored and include restore_path",
                 entry_id=record["entry_id"],
             )
+    if "error_code" in record:
+        raise _invalid_record(
+            line_number,
+            "error_code is not valid on P2 trash or restore records",
+            entry_id=record["entry_id"],
+        )
     if "extensions" in record and not isinstance(record["extensions"], dict):
         raise _invalid_record(
             line_number,
@@ -276,8 +283,7 @@ def _validate_record(record: Any, layout: Layout, line_number: int) -> dict[str,
 
 def _read_records(layout: Layout, report: AuditReport) -> list[dict[str, Any]]:
     try:
-        with open(layout.ledger, "r", encoding="utf-8", newline="") as stream:
-            lines = stream.readlines()
+        lines = read_ledger_lines(layout)
     except UnicodeDecodeError as exc:
         report.errors.append(
             error(
@@ -286,6 +292,9 @@ def _read_records(layout: Layout, report: AuditReport) -> list[dict[str, Any]]:
                 line=getattr(exc, "start", None),
             )
         )
+        return []
+    except SafeDeleteError as exc:
+        report.errors.append(exc)
         return []
     except OSError as exc:
         report.errors.append(

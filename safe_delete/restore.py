@@ -10,98 +10,105 @@ from .audit import LedgerEntry
 from .errors import SafeDeleteError, error
 from .ledger import append_event, build_restore_record
 from .move import atomic_move
-from .storage import Layout, ensure_safe_target, has_entry, same_filesystem
+from .storage import Layout, ensure_safe_target, open_directory_without_symlinks
 
 
-def _existing_parent(path: Path) -> Path:
-    cursor = path
-    while True:
-        try:
-            os.lstat(cursor)
-        except FileNotFoundError:
-            if cursor.parent == cursor:
-                return cursor
-            cursor = cursor.parent
-            continue
-        except OSError as exc:
-            raise error(
-                "storage_failure",
-                f"cannot inspect restore parent: {cursor}",
-                path=str(cursor),
-                errno=exc.errno,
-            ) from exc
-        return cursor
-
-
-def _make_missing_parents(parent: Path) -> list[Path]:
-    missing: list[Path] = []
-    cursor = parent
-    while True:
-        try:
-            st = os.lstat(cursor)
-        except FileNotFoundError:
-            missing.append(cursor)
-            if cursor.parent == cursor:
-                break
-            cursor = cursor.parent
-            continue
-        except OSError as exc:
-            raise error(
-                "storage_failure",
-                f"cannot inspect restore parent: {cursor}",
-                path=str(cursor),
-                errno=exc.errno,
-            ) from exc
-        if not os.path.isdir(cursor) or os.path.islink(cursor):
-            raise error(
-                "destination_parent_missing",
-                f"restore parent is not a real directory: {cursor}",
-                path=str(cursor),
-            )
-        break
-
-    created: list[Path] = []
-    for directory in reversed(missing):
-        try:
-            os.mkdir(directory, 0o700)
-        except FileExistsError:
-            try:
-                st = os.lstat(directory)
-            except OSError as exc:
-                raise error(
-                    "storage_failure",
-                    f"cannot inspect restore parent after a race: {directory}",
-                    path=str(directory),
-                    errno=exc.errno,
-                ) from exc
-            if os.path.islink(directory) or not os.path.isdir(directory):
-                raise error(
-                    "destination_parent_missing",
-                    f"restore parent is not a real directory: {directory}",
-                    path=str(directory),
-                )
-        except OSError as exc:
-            raise error(
-                "storage_failure",
-                f"cannot create restore parent: {directory}",
-                path=str(directory),
-                errno=exc.errno,
-            ) from exc
-        else:
-            created.append(directory)
-    return created
+def _lstat_at(parent_fd: int, name: str) -> os.stat_result | None:
+    try:
+        return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
 
 
 def _remove_created_parents(created: list[Path]) -> None:
+    """Remove only empty directories through a verified parent descriptor."""
+
     for directory in reversed(created):
+        parent_fd = None
         try:
-            os.rmdir(directory)
-        except FileNotFoundError:
+            parent_fd = open_directory_without_symlinks(directory.parent)
+            os.rmdir(directory.name, dir_fd=parent_fd)
+        except (OSError, SafeDeleteError):
+            # A user or concurrent process may have populated or replaced a
+            # newly-created parent. No pathname cleanup may follow a link.
             continue
-        except OSError:
-            # A user or concurrent process may have populated a newly-created
-            # parent. Never remove non-empty data while trying to clean up.
-            continue
+        finally:
+            if parent_fd is not None:
+                os.close(parent_fd)
+
+
+def _open_restore_parent(parent: Path, *, create_parents: bool) -> tuple[int, list[Path]]:
+    """Open/create a destination parent using mkdirat-style operations."""
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    if not getattr(os, "O_DIRECTORY", 0) or not getattr(os, "O_NOFOLLOW", 0):
+        raise error(
+            "storage_failure",
+            "safe restore parent descriptors are unavailable on this platform",
+            path=str(parent),
+        )
+
+    fd = open_directory_without_symlinks(Path("/"))
+    current = Path("/")
+    created: list[Path] = []
+    try:
+        for component in Path(os.path.normpath(os.fspath(parent))).parts[1:]:
+            next_path = current / component
+            try:
+                next_fd = os.open(component, flags, dir_fd=fd)
+            except FileNotFoundError:
+                if not create_parents:
+                    raise
+                try:
+                    os.mkdir(component, 0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                else:
+                    created.append(next_path)
+                # Reopening with O_NOFOLLOW verifies the object that won the
+                # mkdir race is a real directory before it is traversed.
+                next_fd = os.open(component, flags, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+            current = next_path
+        return fd, created
+    except BaseException:
+        os.close(fd)
+        _remove_created_parents(created)
+        raise
+
+
+def _parent_error(exc: BaseException, parent: Path, entry_id: str) -> SafeDeleteError:
+    if isinstance(exc, SafeDeleteError):
+        return exc
+    if isinstance(exc, FileNotFoundError):
+        return error(
+            "destination_parent_missing",
+            f"restore destination parent is missing: {parent}",
+            entry_id=entry_id,
+            path=str(parent),
+        )
+    if isinstance(exc, OSError) and exc.errno in {errno.ENOTDIR, errno.ELOOP}:
+        return error(
+            "destination_parent_missing",
+            f"restore destination parent is not a real directory: {parent}",
+            entry_id=entry_id,
+            path=str(parent),
+        )
+    if isinstance(exc, OSError):
+        return error(
+            "storage_failure",
+            f"cannot open restore destination parent: {parent}",
+            entry_id=entry_id,
+            path=str(parent),
+            errno=exc.errno,
+        )
+    return error(
+        "storage_failure",
+        f"cannot open restore destination parent: {parent}",
+        entry_id=entry_id,
+        path=str(parent),
+    )
 
 
 def _rollback_restore(
@@ -110,9 +117,20 @@ def _rollback_restore(
     payload: str,
     created_parents: list[Path],
     append_error: SafeDeleteError,
+    destination_parent_fd: int,
+    payload_parent_fd: int,
+    payload_stat: os.stat_result,
+    kind: str,
 ) -> SafeDeleteError:
     try:
-        atomic_move(destination, payload)
+        atomic_move(
+            destination,
+            payload,
+            source_parent_fd=destination_parent_fd,
+            destination_parent_fd=payload_parent_fd,
+            expected_source_stat=payload_stat,
+            expected_source_kind=kind,
+        )
     except SafeDeleteError as rollback_error:
         return error(
             "rollback_failed",
@@ -144,140 +162,139 @@ def restore_entry(
 ) -> dict[str, object]:
     """Restore an active entry; the caller must hold the exclusive ledger lock."""
 
+    if restore_path is not None and not restore_path:
+        raise error(
+            "usage_error",
+            "restore destination must not be empty",
+            entry_id=entry.entry_id,
+        )
+
     payload = layout.payload(entry.entry_id)
-    if not has_entry(payload):
-        raise error(
-            "payload_missing",
-            "active ledger entry has no payload",
-            entry_id=entry.entry_id,
-            trashed_path=str(payload),
-        )
-
-    destination = restore_path or entry.original_path
-    destination_path = Path(destination)
-    ensure_safe_target(layout, destination)
-    if has_entry(destination_path):
-        raise error(
-            "destination_exists",
-            f"restore destination already exists: {destination}",
-            entry_id=entry.entry_id,
-            path=destination,
-        )
-
-    parent = destination_path.parent
+    payload_parent_fd = None
+    destination_parent_fd = None
+    created_parents: list[Path] = []
     try:
-        parent_stat = os.stat(parent)
-    except FileNotFoundError:
-        if not create_parents:
-            raise error(
-                "destination_parent_missing",
-                f"restore destination parent is missing: {parent}",
-                entry_id=entry.entry_id,
-                path=str(parent),
-            )
-        nearest = _existing_parent(parent)
         try:
-            nearest_stat = os.stat(nearest)
+            payload_parent_fd = open_directory_without_symlinks(payload.parent)
+            payload_stat = _lstat_at(payload_parent_fd, payload.name)
+        except SafeDeleteError:
+            raise
         except OSError as exc:
             raise error(
                 "storage_failure",
-                f"cannot inspect nearest restore parent: {nearest}",
+                f"cannot inspect trash payload: {payload}",
                 entry_id=entry.entry_id,
-                path=str(nearest),
+                trashed_path=str(payload),
                 errno=exc.errno,
             ) from exc
-        try:
-            payload_parent_stat = os.stat(payload.parent)
-        except OSError as exc:
+        if payload_stat is None:
             raise error(
-                "storage_failure",
-                f"cannot inspect trash payload parent: {payload.parent}",
+                "payload_missing",
+                "active ledger entry has no payload",
                 entry_id=entry.entry_id,
-                path=str(payload.parent),
-                errno=exc.errno,
-            ) from exc
-        if nearest_stat.st_dev != payload_parent_stat.st_dev:
-            raise error(
-                "cross_device",
-                "restore destination and trash are on different filesystems",
-                entry_id=entry.entry_id,
-                destination=destination,
                 trashed_path=str(payload),
             )
-        created_parents = _make_missing_parents(parent)
+
+        destination = entry.original_path if restore_path is None else restore_path
+        destination_path = Path(destination)
+        ensure_safe_target(layout, destination)
+        parent = destination_path.parent
         try:
-            parent_stat = os.stat(parent)
+            destination_parent_fd, created_parents = _open_restore_parent(
+                parent,
+                create_parents=create_parents,
+            )
+        except BaseException as exc:
+            raise _parent_error(exc, parent, entry.entry_id) from exc
+
+        try:
+            destination_stat = _lstat_at(destination_parent_fd, destination_path.name)
         except OSError as exc:
             _remove_created_parents(created_parents)
             raise error(
                 "storage_failure",
-                f"cannot inspect created restore parent: {parent}",
+                f"cannot inspect restore destination: {destination}",
                 entry_id=entry.entry_id,
-                path=str(parent),
+                restore_path=destination,
+                trashed_path=str(payload),
                 errno=exc.errno,
             ) from exc
-    except OSError as exc:
-        if exc.errno in {errno.ENOTDIR, errno.ELOOP}:
+        if destination_stat is not None:
+            _remove_created_parents(created_parents)
             raise error(
-                "destination_parent_missing",
-                f"restore destination parent is not a directory: {parent}",
+                "destination_exists",
+                f"restore destination already exists: {destination}",
                 entry_id=entry.entry_id,
-                path=str(parent),
-            ) from exc
-        raise error(
-            "storage_failure",
-            f"cannot inspect restore destination parent: {parent}",
-            entry_id=entry.entry_id,
-            path=str(parent),
-            errno=exc.errno,
-        ) from exc
-    else:
-        if not os.path.isdir(parent) or os.path.islink(parent):
-            raise error(
-                "destination_parent_missing",
-                f"restore destination parent is not a real directory: {parent}",
-                entry_id=entry.entry_id,
-                path=str(parent),
+                path=destination,
             )
-        created_parents = []
 
-    try:
-        if parent_stat.st_dev != os.stat(payload.parent).st_dev:
+        try:
+            payload_parent_stat = os.fstat(payload_parent_fd)
+            destination_parent_stat = os.fstat(destination_parent_fd)
+        except OSError as exc:
+            _remove_created_parents(created_parents)
+            raise error(
+                "storage_failure",
+                "cannot inspect restore directories",
+                entry_id=entry.entry_id,
+                restore_path=destination,
+                trashed_path=str(payload),
+                errno=exc.errno,
+            ) from exc
+        if payload_parent_stat.st_dev != destination_parent_stat.st_dev:
+            _remove_created_parents(created_parents)
             raise error(
                 "cross_device",
                 "restore destination and trash are on different filesystems",
                 entry_id=entry.entry_id,
-                destination=destination,
+                restore_path=destination,
                 trashed_path=str(payload),
             )
-        atomic_move(payload, destination_path)
-    except SafeDeleteError:
-        _remove_created_parents(created_parents)
-        raise
 
-    record = build_restore_record(
-        entry_id=entry.entry_id,
-        original_path=entry.original_path,
-        trashed_path=str(payload),
-        kind=entry.kind,
-        restore_path=destination,
-    )
-    try:
-        append_event(layout, record)
-    except SafeDeleteError as append_error:
-        raise _rollback_restore(
-            destination=destination,
-            payload=str(payload),
-            created_parents=created_parents,
-            append_error=append_error,
+        try:
+            atomic_move(
+                payload,
+                destination_path,
+                source_parent_fd=payload_parent_fd,
+                destination_parent_fd=destination_parent_fd,
+                expected_source_stat=payload_stat,
+                expected_source_kind=entry.kind,
+            )
+        except SafeDeleteError:
+            _remove_created_parents(created_parents)
+            raise
+
+        record = build_restore_record(
+            entry_id=entry.entry_id,
+            original_path=entry.original_path,
+            trashed_path=str(payload),
+            kind=entry.kind,
+            restore_path=destination,
         )
+        try:
+            append_event(layout, record)
+        except SafeDeleteError as append_error:
+            raise _rollback_restore(
+                destination=destination,
+                payload=str(payload),
+                created_parents=created_parents,
+                append_error=append_error,
+                destination_parent_fd=destination_parent_fd,
+                payload_parent_fd=payload_parent_fd,
+                payload_stat=payload_stat,
+                kind=entry.kind,
+            )
 
-    return {
-        "entry_id": entry.entry_id,
-        "state": "restored",
-        "original_path": entry.original_path,
-        "restore_path": destination,
-        "trashed_path": str(payload),
-        "kind": entry.kind,
-    }
-
+        return {
+            "entry_id": entry.entry_id,
+            "state": "restored",
+            "original_path": entry.original_path,
+            "restore_path": destination,
+            "trashed_path": str(payload),
+            "kind": entry.kind,
+        }
+    finally:
+        if destination_parent_fd is not None:
+            os.close(destination_parent_fd)
+        if payload_parent_fd is not None:
+            os.close(payload_parent_fd)
