@@ -24,6 +24,7 @@ from .ledger import (
     remove_empty_object_directory,
 )
 from .move import atomic_move
+from .restore import restore_entry
 from .storage import (
     ensure_safe_target,
     initialize_layout,
@@ -344,6 +345,41 @@ def _handle_add(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteErr
     return results, errors
 
 
+def _handle_restore(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
+    if not is_uuid4(args.entry_id):
+        return [], [error("usage_error", "entry_id must be a canonical UUID v4", entry_id=args.entry_id)]
+    layout = require_layout(args.root)
+    destination = normalized_path(args.restore_to, field_name="restore destination") if args.restore_to else None
+    with ledger_lock(layout, exclusive=True):
+        report = audit_layout(layout)
+        if report.errors:
+            return [], list(report.errors)
+        entry = report.entries.get(args.entry_id)
+        if entry is None:
+            return [], [error("entry_not_found", "entry was not found", entry_id=args.entry_id)]
+        if entry.state == "restored":
+            return [
+                {
+                    "entry_id": entry.entry_id,
+                    "state": "restored",
+                    "code": "already_restored",
+                    "original_path": entry.original_path,
+                    "restore_path": entry.events[-1].get("restore_path", entry.original_path),
+                    "kind": entry.kind,
+                }
+            ], []
+        try:
+            result = restore_entry(
+                layout,
+                entry,
+                restore_path=destination,
+                create_parents=args.create_parents,
+            )
+        except SafeDeleteError as exc:
+            return [], [exc]
+    return [result], []
+
+
 def _command_name(args: argparse.Namespace) -> str:
     if args.command == "hook" and getattr(args, "hook_command", None):
         return f"hook {args.hook_command}"
@@ -372,7 +408,7 @@ def _dispatch(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError
     if args.command == "add":
         return _handle_add(args)
     if args.command == "restore":
-        return [], [error("usage_error", "restore is not available in this slice")]
+        return _handle_restore(args)
     return [], [error("usage_error", "a command is required")]
 
 
