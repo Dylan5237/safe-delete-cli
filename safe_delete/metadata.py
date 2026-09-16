@@ -179,14 +179,19 @@ class RichMetadata:
 def metadata_from_record(record: Mapping[str, Any]) -> RichMetadata:
     """Validate a ledger record's optional P2/P3 rich fields."""
 
+    raw_project = record.get("project")
+    project = validate_scalar("project", raw_project, normalize_project=True)
+    if (
+        isinstance(raw_project, str)
+        and raw_project.strip()
+        and project != raw_project
+    ):
+        raise _metadata_error("project", "value is not canonically normalized")
     values = {
-        field_name: validate_scalar(
-            field_name,
-            record.get(field_name),
-            normalize_project=field_name == "project",
-        )
+        field_name: validate_scalar(field_name, record.get(field_name))
         for field_name in RICH_SCALAR_FIELDS
     }
+    values["project"] = project
     if "extensions" in record:
         extensions = validate_extensions_object(record["extensions"])
     else:

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .audit import LedgerEntry
 from .errors import SafeDeleteError, error
-from .ledger import append_event, build_restore_record
+from .ledger import append_event, build_restore_record, metadata_for_record
 from .move import atomic_move, rename_without_replace
 from .storage import (
     Layout,
@@ -853,12 +853,14 @@ def restore_entry(
                 created_parent.published = True
             top.staged_name = None
 
+        metadata = metadata_for_record(entry.creation)
         record = build_restore_record(
             entry_id=entry.entry_id,
             original_path=entry.original_path,
             trashed_path=str(payload),
             kind=entry.kind,
             restore_path=destination,
+            metadata=metadata,
         )
         try:
             append_event(layout, record)
@@ -875,7 +877,7 @@ def restore_entry(
                 staging_fd=staging_fd,
             )
 
-        return {
+        result = {
             "entry_id": entry.entry_id,
             "state": "restored",
             "original_path": entry.original_path,
@@ -883,6 +885,8 @@ def restore_entry(
             "trashed_path": str(payload),
             "kind": entry.kind,
         }
+        result.update(metadata.projection_fields())
+        return result
     finally:
         if destination_parent_fd is not None:
             os.close(destination_parent_fd)

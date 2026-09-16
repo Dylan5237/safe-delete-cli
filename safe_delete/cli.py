@@ -6,6 +6,8 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from . import CONTRACT_VERSION, SCHEMA_VERSION, __version__
@@ -22,6 +24,14 @@ from .ledger import (
     create_entry_directory,
     inspect_source,
     remove_empty_object_directory,
+)
+from .metadata import (
+    RichMetadata,
+    metadata_from_record,
+    parse_extensions_json,
+    project_record,
+    validate_extensions_object,
+    validate_scalar,
 )
 from .move import atomic_move
 from .restore import restore_entry
@@ -40,6 +50,22 @@ def _common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", dest="json", action="store_true", default=argparse.SUPPRESS)
 
 
+class _SingleValueAction(argparse.Action):
+    """Reject repeated metadata flags instead of silently taking the last one."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Any,
+        option_string: str | None = None,
+    ) -> None:
+        if getattr(namespace, self.dest, None) is not None:
+            option = option_string or self.dest
+            raise argparse.ArgumentError(parser, f"{option} may be specified only once")
+        setattr(namespace, self.dest, values)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="safe-delete")
     parser.set_defaults(root=None, json=False)
@@ -52,11 +78,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_parser = commands.add_parser("add")
     _common_options(add_parser)
     add_parser.add_argument("paths", nargs="+")
-    add_parser.add_argument("--reason")
-    add_parser.add_argument("--project")
-    add_parser.add_argument("--session-id")
-    add_parser.add_argument("--agent")
-    add_parser.add_argument("--tool")
+    add_parser.add_argument("--reason", action=_SingleValueAction)
+    add_parser.add_argument("--project", action=_SingleValueAction)
+    add_parser.add_argument("--session-id", action=_SingleValueAction)
+    add_parser.add_argument("--agent", action=_SingleValueAction)
+    add_parser.add_argument("--tool", action=_SingleValueAction)
+    add_parser.add_argument("--extensions", action=_SingleValueAction)
     add_parser.add_argument("--dry-run", action="store_true")
 
     list_parser = commands.add_parser("list")
@@ -143,7 +170,7 @@ def _emit(command: str, results: list[Any], errors: list[SafeDeleteError], json_
 
 
 def _entry_result(entry: LedgerEntry) -> dict[str, Any]:
-    return {
+    result = {
         "entry_id": entry.entry_id,
         "state": entry.state,
         "original_path": entry.original_path,
@@ -151,10 +178,144 @@ def _entry_result(entry: LedgerEntry) -> dict[str, Any]:
         "kind": entry.kind,
         "timestamp": entry.creation["timestamp"],
     }
+    result.update(metadata_from_record(entry.creation).projection_fields())
+    return result
 
 
 def _audit_errors_for_list(report: AuditReport) -> list[SafeDeleteError]:
     return list(report.errors)
+
+
+_MISSING = object()
+
+
+def _hook_context_from_args(
+    args: argparse.Namespace,
+    supplied: object = _MISSING,
+) -> tuple[Mapping[str, Any], bool]:
+    if supplied is not _MISSING:
+        candidate = supplied
+    else:
+        candidate = _MISSING
+        for attribute in ("hook_context", "adapter_context", "hook", "context"):
+            if hasattr(args, attribute):
+                candidate = getattr(args, attribute)
+                break
+        if candidate is _MISSING or candidate is None:
+            return {}, False
+    if candidate is None:
+        return {}, False
+    if not isinstance(candidate, Mapping):
+        raise error("usage_error", "hook context must be a JSON object")
+    return candidate, True
+
+
+def _nearest_supported_project_root(start: str | os.PathLike[str] | None = None) -> str | None:
+    """Detect the nearest Git project root, the only P3-supported detector."""
+
+    candidate = Path(os.path.abspath(os.fspath(start or os.getcwd())))
+    if not candidate.is_dir():
+        candidate = candidate.parent
+    while True:
+        # A worktree's .git is a file, while a normal checkout uses a
+        # directory; both are supported project roots.
+        if os.path.lexists(candidate / ".git"):
+            return normalized_path(str(candidate), field_name="project")
+        if candidate.parent == candidate:
+            return None
+        candidate = candidate.parent
+
+
+def _selected_value(
+    args: argparse.Namespace,
+    context: Mapping[str, Any],
+    hook_present: bool,
+    field_name: str,
+    env_name: str | None = None,
+) -> object:
+    flag_value = getattr(args, field_name, _MISSING)
+    if flag_value is not _MISSING and flag_value is not None:
+        return flag_value
+    if hook_present and field_name in context:
+        return context[field_name]
+    if env_name is not None and env_name in os.environ:
+        return os.environ[env_name]
+    return _MISSING
+
+
+def resolve_metadata(
+    args: argparse.Namespace,
+    *,
+    hook_context: object = _MISSING,
+    invocation_dir: str | os.PathLike[str] | None = None,
+) -> RichMetadata:
+    """Resolve and validate the frozen P3 metadata source precedence."""
+
+    context, hook_present = _hook_context_from_args(args, hook_context)
+
+    project = _selected_value(
+        args,
+        context,
+        hook_present,
+        "project",
+        "SAFE_DELETE_PROJECT",
+    )
+    if project is _MISSING:
+        project = _nearest_supported_project_root(invocation_dir)
+
+    session_id = _selected_value(
+        args,
+        context,
+        hook_present,
+        "session_id",
+        "SAFE_DELETE_SESSION_ID",
+    )
+    reason = _selected_value(args, context, hook_present, "reason")
+    agent = _selected_value(
+        args,
+        context,
+        hook_present,
+        "agent",
+        "SAFE_DELETE_AGENT",
+    )
+    if session_id is _MISSING:
+        session_id = None
+    if reason is _MISSING:
+        reason = None
+    if agent is _MISSING:
+        agent = None
+
+    flag_tool = getattr(args, "tool", _MISSING)
+    if flag_tool is not _MISSING and flag_tool is not None:
+        tool: object = flag_tool
+    elif hook_present:
+        hook_tool = context.get("tool", _MISSING)
+        # A hook/adapter is a known caller even when it does not identify its
+        # own tool; use the same explicit direct-CLI identity in that case.
+        tool = (
+            "safe-delete-cli"
+            if hook_tool is _MISSING or hook_tool is None or hook_tool == ""
+            else hook_tool
+        )
+    else:
+        tool = "safe-delete-cli"
+
+    flag_extensions = getattr(args, "extensions", _MISSING)
+    if flag_extensions is not _MISSING and flag_extensions is not None:
+        extensions = parse_extensions_json(flag_extensions)
+    elif hook_present and "extensions" in context:
+        extensions = validate_extensions_object(context["extensions"])
+    else:
+        extensions = None
+
+    return RichMetadata(
+        project=validate_scalar("project", project, normalize_project=True),
+        session_id=validate_scalar("session_id", session_id),
+        reason=validate_scalar("reason", reason),
+        agent=validate_scalar("agent", agent),
+        tool=validate_scalar("tool", tool),
+        extensions=extensions,
+    )
 
 
 def _handle_init(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
@@ -172,8 +333,16 @@ def _handle_init(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteEr
 
 def _handle_list(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
     layout = require_layout(args.root)
-    project_filter = normalized_path(args.project, field_name="project") if args.project else None
-    original_filter = normalized_path(args.original, field_name="original") if args.original else None
+    project_filter = (
+        normalized_path(args.project, field_name="project")
+        if args.project is not None
+        else None
+    )
+    original_filter = (
+        normalized_path(args.original, field_name="original")
+        if args.original is not None
+        else None
+    )
     with ledger_lock(layout, exclusive=False):
         report = audit_layout(layout)
     results: list[Any] = []
@@ -206,8 +375,8 @@ def _handle_show(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteEr
         {
             "entry_id": entry.entry_id,
             "state": entry.state,
-            "creation": entry.creation,
-            "events": entry.events,
+            "creation": project_record(entry.creation),
+            "events": [project_record(event) for event in entry.events],
         }
     ], []
 
@@ -278,9 +447,20 @@ def _failed_input_result(path: str, exc: SafeDeleteError) -> dict[str, Any]:
     }
 
 
-def _handle_add(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
+def _handle_add(
+    args: argparse.Namespace,
+    *,
+    hook_context: object = _MISSING,
+) -> tuple[list[Any], list[SafeDeleteError]]:
     results: list[Any] = []
     errors: list[SafeDeleteError] = []
+    try:
+        metadata = resolve_metadata(args, hook_context=hook_context)
+    except SafeDeleteError as exc:
+        return [
+            _failed_input_result(raw_path, _with_path(exc, raw_path))
+            for raw_path in args.paths
+        ], [exc]
     try:
         layout = initialize_layout(args.root)
     except SafeDeleteError as exc:
@@ -321,14 +501,14 @@ def _handle_add(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteErr
                             destination=str(layout.objects),
                         )
                     if args.dry_run:
-                        results.append(
-                            {
-                                "path": original_path,
-                                "original_path": original_path,
-                                "kind": source.kind,
-                                "dry_run": True,
-                            }
-                        )
+                        result = {
+                            "path": original_path,
+                            "original_path": original_path,
+                            "kind": source.kind,
+                            "dry_run": True,
+                        }
+                        result.update(metadata.projection_fields())
+                        results.append(result)
                         succeeded_inputs += 1
                         continue
 
@@ -354,6 +534,7 @@ def _handle_add(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteErr
                         original_path=original_path,
                         trashed_path=str(payload_path),
                         kind=source.kind,
+                        metadata=metadata,
                     )
                     try:
                         append_event(layout, record)
@@ -368,16 +549,16 @@ def _handle_add(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteErr
                         results.append(_failed_input_result(raw_path, rollback_error))
                         failed_inputs += 1
                         continue
-                    results.append(
-                        {
-                            "entry_id": entry_id,
-                            "path": original_path,
-                            "original_path": original_path,
-                            "trashed_path": str(payload_path),
-                            "kind": source.kind,
-                            "state": "active",
-                        }
-                    )
+                    result = {
+                        "entry_id": entry_id,
+                        "path": original_path,
+                        "original_path": original_path,
+                        "trashed_path": str(payload_path),
+                        "kind": source.kind,
+                        "state": "active",
+                    }
+                    result.update(metadata.projection_fields())
+                    results.append(result)
                     succeeded_inputs += 1
                 except SafeDeleteError as exc:
                     exc = _with_path(exc, raw_path)
@@ -437,16 +618,16 @@ def _handle_restore(args: argparse.Namespace) -> tuple[list[Any], list[SafeDelet
         if entry is None:
             return [], [error("entry_not_found", "entry was not found", entry_id=args.entry_id)]
         if entry.state == "restored":
-            return [
-                {
-                    "entry_id": entry.entry_id,
-                    "state": "restored",
-                    "code": "already_restored",
-                    "original_path": entry.original_path,
-                    "restore_path": entry.events[-1].get("restore_path", entry.original_path),
-                    "kind": entry.kind,
-                }
-            ], []
+            result = {
+                "entry_id": entry.entry_id,
+                "state": "restored",
+                "code": "already_restored",
+                "original_path": entry.original_path,
+                "restore_path": entry.events[-1].get("restore_path", entry.original_path),
+                "kind": entry.kind,
+            }
+            result.update(metadata_from_record(entry.creation).projection_fields())
+            return [result], []
         try:
             result = restore_entry(
                 layout,

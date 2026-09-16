@@ -420,6 +420,16 @@ def _replay(records: list[dict[str, Any]], report: AuditReport) -> None:
             )
             report.tainted_entry_ids.add(entry_id)
             continue
+        if metadata_from_record(record) != metadata_from_record(current.creation):
+            report.errors.append(
+                error(
+                    "impossible_transition",
+                    "lifecycle event changes rich deletion metadata",
+                    entry_id=entry_id,
+                )
+            )
+            report.tainted_entry_ids.add(entry_id)
+            continue
         current.events.append(record)
         current.state = "restored"
 
