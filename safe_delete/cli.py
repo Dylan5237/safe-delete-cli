@@ -39,6 +39,7 @@ from .storage import (
     ensure_safe_target,
     initialize_layout,
     ledger_lock,
+    layout_for,
     normalized_path,
     require_layout,
     same_filesystem,
@@ -447,6 +448,68 @@ def _failed_input_result(path: str, exc: SafeDeleteError) -> dict[str, Any]:
     }
 
 
+def _nearest_existing_path(path: Path) -> Path:
+    """Find the read-only filesystem anchor for a conceptual dry-run target."""
+
+    candidate = path
+    while not os.path.lexists(candidate) and candidate.parent != candidate:
+        candidate = candidate.parent
+    return candidate
+
+
+def _handle_add_dry_run(
+    args: argparse.Namespace,
+    *,
+    layout: Any,
+    metadata: RichMetadata,
+) -> tuple[list[Any], list[SafeDeleteError]]:
+    """Validate an add preview without creating or opening durable storage."""
+
+    results: list[Any] = []
+    errors: list[SafeDeleteError] = []
+    failed_inputs = 0
+    succeeded_inputs = 0
+    target_anchor = _nearest_existing_path(layout.objects)
+
+    for raw_path in args.paths:
+        try:
+            original_path = normalized_path(raw_path)
+            ensure_safe_target(layout, original_path)
+            source = inspect_source(layout, original_path)
+            if not same_filesystem(original_path, target_anchor):
+                raise error(
+                    "cross_device",
+                    "source and trash objects are on different filesystems",
+                    source=original_path,
+                    destination=str(layout.objects),
+                )
+            result = {
+                "path": original_path,
+                "original_path": original_path,
+                "kind": source.kind,
+                "dry_run": True,
+            }
+            result.update(metadata.projection_fields())
+            results.append(result)
+            succeeded_inputs += 1
+        except SafeDeleteError as exc:
+            exc = _with_path(exc, raw_path)
+            errors.append(exc)
+            results.append(_failed_input_result(raw_path, exc))
+            failed_inputs += 1
+
+    if succeeded_inputs and failed_inputs:
+        errors.append(
+            error(
+                "partial_failure",
+                "one or more add inputs failed after independent processing",
+                succeeded=succeeded_inputs,
+                failed=failed_inputs,
+            )
+        )
+    return results, errors
+
+
 def _handle_add(
     args: argparse.Namespace,
     *,
@@ -461,6 +524,15 @@ def _handle_add(
             _failed_input_result(raw_path, _with_path(exc, raw_path))
             for raw_path in args.paths
         ], [exc]
+    if args.dry_run:
+        try:
+            layout = layout_for(args.root)
+        except SafeDeleteError as exc:
+            return [
+                _failed_input_result(raw_path, _with_path(exc, raw_path))
+                for raw_path in args.paths
+            ], [exc]
+        return _handle_add_dry_run(args, layout=layout, metadata=metadata)
     try:
         layout = initialize_layout(args.root)
     except SafeDeleteError as exc:
@@ -703,6 +775,8 @@ def main(argv: list[str] | None = None) -> int:
         results, errors = _dispatch(args)
     except SafeDeleteError as exc:
         results, errors = [], [exc]
+    except RecursionError:
+        results, errors = [], [error("usage_error", "value is too deeply nested")]
     except (OSError, TypeError, ValueError) as exc:
         results, errors = [], [error("storage_failure", str(exc))]
     return _emit(command, results, errors, bool(args.json))

@@ -22,6 +22,11 @@ _SCALAR_LIMITS = {
     "tool": 256,
 }
 EXTENSIONS_MAX_BYTES = 16 * 1024
+# Keep extension validation and the subsequent JSON/copy operations below
+# Python's recursion limit. The frozen size limit remains the primary
+# contract; pathological nesting becomes a stable usage error instead of an
+# interpreter-level RecursionError.
+EXTENSIONS_MAX_DEPTH = 128
 
 
 def _metadata_error(field_name: str, message: str) -> SafeDeleteError:
@@ -83,17 +88,22 @@ def _reject_non_finite(value: str) -> Any:
     raise ValueError(f"non-finite JSON value: {value}")
 
 
-def _validate_extension_value(value: Any, *, path: str) -> None:
+def _validate_extension_value(value: Any, *, path: str, depth: int = 0) -> None:
+    if depth > EXTENSIONS_MAX_DEPTH:
+        raise _metadata_error(
+            "extensions",
+            f"nested value exceeds maximum depth {EXTENSIONS_MAX_DEPTH}",
+        )
     if isinstance(value, dict):
         for key, nested in value.items():
             if not isinstance(key, str):
                 raise _metadata_error("extensions", f"key at {path} is not a string")
             _encoded_utf8(key, field_name="extensions")
-            _validate_extension_value(nested, path=f"{path}.{key}")
+            _validate_extension_value(nested, path=f"{path}.{key}", depth=depth + 1)
         return
     if isinstance(value, list):
         for index, nested in enumerate(value):
-            _validate_extension_value(nested, path=f"{path}[{index}]")
+            _validate_extension_value(nested, path=f"{path}[{index}]", depth=depth + 1)
         return
     if isinstance(value, str):
         _encoded_utf8(value, field_name="extensions")
@@ -110,14 +120,17 @@ def validate_extensions_object(value: Any) -> dict[str, Any]:
 
     if not isinstance(value, dict):
         raise _metadata_error("extensions", "value must be a JSON object")
-    _validate_extension_value(value, path="$")
     try:
+        _validate_extension_value(value, path="$")
         encoded = json.dumps(
             value,
             ensure_ascii=False,
             allow_nan=False,
             separators=(",", ":"),
         ).encode("utf-8")
+        copied = copy.deepcopy(value)
+    except RecursionError as exc:
+        raise _metadata_error("extensions", "value is too deeply nested") from exc
     except (TypeError, ValueError, UnicodeEncodeError) as exc:
         raise _metadata_error("extensions", "value is not finite UTF-8 JSON") from exc
     if len(encoded) > EXTENSIONS_MAX_BYTES:
@@ -125,7 +138,7 @@ def validate_extensions_object(value: Any) -> dict[str, Any]:
             "extensions",
             f"compact UTF-8 value exceeds {EXTENSIONS_MAX_BYTES} bytes",
         )
-    return copy.deepcopy(value)
+    return copied
 
 
 def parse_extensions_json(value: Any) -> dict[str, Any]:
@@ -139,7 +152,13 @@ def parse_extensions_json(value: Any) -> dict[str, Any]:
             object_pairs_hook=_reject_duplicate_keys,
             parse_constant=_reject_non_finite,
         )
-    except (json.JSONDecodeError, UnicodeDecodeError, _DuplicateKey, ValueError) as exc:
+    except (
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        _DuplicateKey,
+        ValueError,
+        RecursionError,
+    ) as exc:
         raise _metadata_error("extensions", "value must be finite JSON without duplicate keys") from exc
     return validate_extensions_object(decoded)
 
@@ -202,6 +221,7 @@ def metadata_from_record(record: Mapping[str, Any]) -> RichMetadata:
 def project_record(record: Mapping[str, Any]) -> dict[str, Any]:
     """Project a validated raw record without changing the raw ledger object."""
 
+    metadata = metadata_from_record(record)
     projected = copy.deepcopy(dict(record))
-    projected.update(metadata_from_record(record).projection_fields())
+    projected.update(metadata.projection_fields())
     return projected

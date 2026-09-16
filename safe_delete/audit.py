@@ -13,6 +13,7 @@ from typing import Any
 from .errors import SafeDeleteError, error
 from .ledger import read_ledger_lines
 from .metadata import (
+    RICH_SCALAR_FIELDS,
     _reject_duplicate_keys,
     _reject_non_finite,
     metadata_from_record,
@@ -285,6 +286,12 @@ def _validate_record(record: Any, layout: Layout, line_number: int) -> dict[str,
         )
     try:
         metadata_from_record(record)
+    except RecursionError as exc:
+        raise _invalid_record(
+            line_number,
+            "rich metadata is too deeply nested",
+            entry_id=record.get("entry_id") if isinstance(record.get("entry_id"), str) else entry_hint,
+        ) from exc
     except SafeDeleteError as exc:
         raise _invalid_record(
             line_number,
@@ -332,6 +339,14 @@ def _read_records(layout: Layout, report: AuditReport) -> list[dict[str, Any]]:
                 object_pairs_hook=_reject_duplicate_keys,
                 parse_constant=_reject_non_finite,
             )
+        except RecursionError:
+            report.errors.append(
+                _invalid_record(
+                    line_number,
+                    "invalid JSON ledger line: value is too deeply nested",
+                )
+            )
+            continue
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             report.errors.append(
                 _invalid_record(line_number, f"invalid JSON ledger line: {exc}")
@@ -420,6 +435,23 @@ def _replay(records: list[dict[str, Any]], report: AuditReport) -> None:
             )
             report.tainted_entry_ids.add(entry_id)
             continue
+        if all(field_name in current.creation for field_name in RICH_SCALAR_FIELDS):
+            missing_rich_fields = [
+                field_name
+                for field_name in RICH_SCALAR_FIELDS
+                if field_name not in record
+            ]
+            if missing_rich_fields:
+                report.errors.append(
+                    error(
+                        "malformed_ledger",
+                        "P3 lifecycle event is missing required rich field(s): "
+                        + ", ".join(missing_rich_fields),
+                        entry_id=entry_id,
+                    )
+                )
+                report.tainted_entry_ids.add(entry_id)
+                continue
         if metadata_from_record(record) != metadata_from_record(current.creation):
             report.errors.append(
                 error(

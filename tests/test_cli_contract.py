@@ -413,6 +413,41 @@ class CliContractTests(unittest.TestCase):
         self.assertTrue(source.is_file())
         self.assertEqual((self.storage / "ledger.jsonl").read_text(encoding="utf-8"), "")
 
+    def test_p3_fresh_root_dry_run_does_not_initialize_layout(self) -> None:
+        source = self.workspace / "fresh-dry-run.txt"
+        source.write_text("dry", encoding="utf-8")
+        extensions = {"preview": {"source": "fresh-root"}}
+        code, payload = run_cli_at(
+            self.storage,
+            Path(self.temp_dir.name),
+            "add",
+            "--dry-run",
+            "--project",
+            str(self.workspace / "project"),
+            "--session-id",
+            "fresh-session",
+            "--reason",
+            "preview",
+            "--agent",
+            "fresh-agent",
+            "--tool",
+            "fresh-tool",
+            "--extensions",
+            json.dumps(extensions),
+            "--",
+            str(source),
+        )
+        self.assertEqual(code, 0, payload)
+        result = payload["results"][0]
+        self.assertEqual(result["project"], str(self.workspace / "project"))
+        self.assertEqual(result["session_id"], "fresh-session")
+        self.assertEqual(result["reason"], "preview")
+        self.assertEqual(result["agent"], "fresh-agent")
+        self.assertEqual(result["tool"], "fresh-tool")
+        self.assertEqual(result["extensions"], extensions)
+        self.assertTrue(source.is_file())
+        self.assertFalse(self.storage.exists())
+
     def test_p3_invalid_metadata_is_rejected_before_move_or_append(self) -> None:
         cases = [
             ("non-object", "--extensions", "[]"),
@@ -464,6 +499,39 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(errors[0].code, "usage_error")
         self.assertTrue(source.is_file())
         self.assertEqual((self.storage / "ledger.jsonl").read_text(encoding="utf-8"), "")
+
+    def test_p3_deep_extensions_emit_stable_usage_error(self) -> None:
+        source = self.workspace / "deep-extensions.txt"
+        source.write_text("must stay", encoding="utf-8")
+        depth = 1100
+        nested = '{"deep":' * depth + "null" + "}" * depth
+        self.assertLess(len(nested.encode("utf-8")), 16 * 1024)
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(CLI),
+                "--root",
+                str(self.storage),
+                "--json",
+                "add",
+                "--dry-run",
+                "--extensions",
+                nested,
+                "--",
+                str(source),
+            ],
+            cwd=REPOSITORY_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        payload = json.loads(completed.stdout)
+        self.assertEqual(completed.returncode, 2, payload)
+        self.assertEqual(payload["errors"][0]["code"], "usage_error")
+        self.assertNotIn("Traceback", completed.stderr)
+        self.assertTrue(source.is_file())
+        self.assertFalse(self.storage.exists())
 
     def test_p3_legacy_fixture_projects_null_without_rewriting_and_restores(self) -> None:
         self.init_storage()
@@ -531,6 +599,38 @@ class CliContractTests(unittest.TestCase):
         )
         self.assertEqual(code, 0, all_entries)
         self.assertEqual(all_entries["results"][0]["state"], "restored")
+
+    def test_p3_restore_requires_scalar_keys_on_lifecycle_events(self) -> None:
+        self.init_storage()
+        source = self.workspace / "missing-rich-scalar.txt"
+        source.write_text("content", encoding="utf-8")
+        code, added = run_cli(self.storage, "add", "--", str(source))
+        self.assertEqual(code, 0, added)
+        creation = json.loads((self.storage / "ledger.jsonl").read_text(encoding="utf-8"))
+        payload = Path(added["results"][0]["trashed_path"])
+        payload.rename(source)
+
+        restore_record = {
+            **creation,
+            "event_id": str(uuid.uuid4()),
+            "operation": "restore",
+            "state": "restored",
+            "restore_path": str(source),
+        }
+        restore_record.pop("reason")
+        (self.storage / "ledger.jsonl").write_text(
+            json.dumps(creation, separators=(",", ":"))
+            + "\n"
+            + json.dumps(restore_record, separators=(",", ":"))
+            + "\n",
+            encoding="utf-8",
+        )
+
+        code, audited = run_cli(self.storage, "list", "--all")
+        self.assertEqual(code, 4, audited)
+        self.assertEqual(audited["results"], [])
+        self.assertEqual(audited["errors"][0]["code"], "malformed_ledger")
+        self.assertIn("reason", audited["errors"][0]["message"])
 
     def test_orphan_listing_preserves_ledger_failure_during_reconciliation(self) -> None:
         self.init_storage()
@@ -976,6 +1076,64 @@ class CliContractTests(unittest.TestCase):
         self.assertTrue(payload.is_file())
         self.assertFalse(source.exists())
         self.assertEqual(len((self.storage / "ledger.jsonl").read_text().splitlines()), 1)
+
+    def test_restore_metadata_failure_is_preflighted_before_payload_move(self) -> None:
+        self.init_storage()
+        source = self.workspace / "metadata-failure-restore.txt"
+        source.write_text("content", encoding="utf-8")
+        code, added = run_cli(self.storage, "add", "--", str(source))
+        self.assertEqual(code, 0, added)
+        entry_id = added["results"][0]["entry_id"]
+        payload = Path(added["results"][0]["trashed_path"])
+
+        import safe_delete.cli as cli
+        import safe_delete.restore as restore
+        from safe_delete.errors import SafeDeleteError
+
+        injected = SafeDeleteError("usage_error", "metadata validation blocked")
+        args = Namespace(
+            root=str(self.storage), entry_id=entry_id, restore_to=None,
+            create_parents=False,
+        )
+        with patch.object(restore, "metadata_for_record", side_effect=injected):
+            results, errors = cli._handle_restore(args)
+        self.assertEqual(results, [])
+        self.assertEqual(errors[0].code, "usage_error")
+        self.assertFalse(source.exists())
+        self.assertTrue(payload.is_file())
+        self.assertEqual(len((self.storage / "ledger.jsonl").read_text().splitlines()), 1)
+
+    def test_restore_record_build_failure_rolls_back_staged_parents_before_move(self) -> None:
+        self.init_storage()
+        source = self.workspace / "build-failure-restore.txt"
+        source.write_text("content", encoding="utf-8")
+        code, added = run_cli(self.storage, "add", "--", str(source))
+        self.assertEqual(code, 0, added)
+        entry_id = added["results"][0]["entry_id"]
+        payload = Path(added["results"][0]["trashed_path"])
+        target = self.workspace / "build-failure" / "nested" / "target.txt"
+
+        import safe_delete.cli as cli
+        import safe_delete.restore as restore
+        from safe_delete.errors import SafeDeleteError
+
+        injected = SafeDeleteError("storage_failure", "restore record build blocked")
+        args = Namespace(
+            root=str(self.storage), entry_id=entry_id, restore_to=str(target),
+            create_parents=True,
+        )
+        with patch.object(restore, "build_restore_record", side_effect=injected):
+            results, errors = cli._handle_restore(args)
+        self.assertEqual(results, [])
+        self.assertEqual(errors[0].code, "storage_failure")
+        self.assertFalse(source.exists())
+        self.assertTrue(payload.is_file())
+        self.assertFalse(target.exists())
+        self.assertFalse((self.workspace / "build-failure").exists())
+        self.assertEqual(len((self.storage / "ledger.jsonl").read_text().splitlines()), 1)
+        staging = self.storage / "trash" / "staging"
+        if staging.exists():
+            self.assertEqual(list(staging.iterdir()), [])
 
     def test_restore_collision_is_no_overwrite_and_history_is_preserved(self) -> None:
         self.init_storage()
