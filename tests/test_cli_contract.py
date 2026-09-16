@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import contextlib
+import errno
+import io
 import os
 import subprocess
 import sys
@@ -151,6 +154,264 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(code, 4, normal_payload)
         self.assertEqual(normal_payload["errors"][0]["code"], "orphan_payload")
 
+    def test_empty_add_path_is_rejected_without_touching_cwd(self) -> None:
+        self.init_storage()
+        cwd = REPOSITORY_ROOT / "safe-delete"
+        code, payload = run_cli(self.storage, "add", "--", "")
+        self.assertEqual(code, 2, payload)
+        self.assertEqual(payload["errors"][0]["code"], "usage_error")
+        self.assertEqual(len(payload["results"]), 1)
+        self.assertFalse(payload["results"][0]["ok"])
+        self.assertTrue(cwd.is_file())
+        self.assertEqual(list((self.storage / "trash" / "objects").iterdir()), [])
+
+    def test_append_repairs_missing_jsonl_delimiter(self) -> None:
+        self.init_storage()
+        first = self.workspace / "first.txt"
+        second = self.workspace / "second.txt"
+        first.write_text("first", encoding="utf-8")
+        second.write_text("second", encoding="utf-8")
+        code, first_payload = run_cli(self.storage, "add", "--", str(first))
+        self.assertEqual(code, 0, first_payload)
+        ledger = self.storage / "ledger.jsonl"
+        ledger.write_bytes(ledger.read_bytes().rstrip(b"\n"))
+
+        code, second_payload = run_cli(self.storage, "add", "--", str(second))
+        self.assertEqual(code, 0, second_payload)
+        code, listed = run_cli(self.storage, "list")
+        self.assertEqual(code, 0, listed)
+        self.assertEqual(listed["errors"], [])
+        self.assertEqual(len(listed["results"]), 2)
+        self.assertEqual(len(ledger.read_text(encoding="utf-8").splitlines()), 2)
+
+    def test_malformed_field_types_emit_json_malformed_ledger_without_traceback(self) -> None:
+        self.init_storage()
+        record = {
+            "schema_version": 1,
+            "event_id": str(uuid.uuid4()),
+            "entry_id": str(uuid.uuid4()),
+            "operation": [],
+            "state": "active",
+            "original_path": str(self.workspace / "item"),
+            "trashed_path": str(self.storage / "trash" / "objects" / "x" / "payload"),
+            "kind": "file",
+            "timestamp": "2026-09-16T07:00:00Z",
+        }
+        (self.storage / "ledger.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+        completed = subprocess.run(
+            [sys.executable, str(CLI), "--root", str(self.storage), "--json", "list"],
+            cwd=REPOSITORY_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        payload = json.loads(completed.stdout)
+        self.assertEqual(completed.returncode, 4, payload)
+        self.assertEqual(payload["errors"][0]["code"], "malformed_ledger")
+        self.assertNotIn("Traceback", completed.stderr)
+
+    def test_audit_rejects_unknown_fields_and_unsafe_ledger_paths(self) -> None:
+        self.init_storage()
+        source = self.workspace / "source.txt"
+        source.write_text("content", encoding="utf-8")
+        code, added = run_cli(self.storage, "add", "--", str(source))
+        self.assertEqual(code, 0, added)
+        ledger = self.storage / "ledger.jsonl"
+        record = json.loads(ledger.read_text(encoding="utf-8"))
+
+        record["unexpected"] = True
+        ledger.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        code, unknown = run_cli(self.storage, "list")
+        self.assertEqual(code, 4, unknown)
+        self.assertEqual(unknown["errors"][0]["code"], "malformed_ledger")
+
+        record.pop("unexpected")
+        record["original_path"] = str(self.storage / "trash" / "escaped")
+        ledger.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        code, unsafe = run_cli(self.storage, "list")
+        self.assertEqual(code, 4, unsafe)
+        self.assertEqual(unsafe["errors"][0]["code"], "malformed_ledger")
+
+    def test_orphan_listing_filters_malformed_ledger_errors(self) -> None:
+        self.init_storage()
+        orphan_id = "550e8400-e29b-41d4-a716-446655440000"
+        orphan_payload = self.storage / "trash" / "objects" / orphan_id / "payload"
+        orphan_payload.parent.mkdir()
+        orphan_payload.write_text("orphan", encoding="utf-8")
+        with (self.storage / "ledger.jsonl").open("a", encoding="utf-8") as ledger:
+            ledger.write("{malformed\n")
+
+        code, payload = run_cli(self.storage, "list", "--orphans")
+        self.assertEqual(code, 4, payload)
+        self.assertEqual([item["code"] for item in payload["errors"]], ["orphan_payload"])
+
+    def test_partial_batch_has_one_result_per_input(self) -> None:
+        self.init_storage()
+        existing = self.workspace / "existing.txt"
+        missing = self.workspace / "missing.txt"
+        existing.write_text("exists", encoding="utf-8")
+        code, payload = run_cli(self.storage, "add", "--", str(existing), str(missing))
+        self.assertEqual(code, 5, payload)
+        self.assertEqual(len(payload["results"]), 2)
+        self.assertEqual(payload["results"][0]["state"], "active")
+        self.assertFalse(payload["results"][1]["ok"])
+        self.assertEqual(payload["results"][1]["error"]["code"], "source_not_found")
+        self.assertIn("partial_failure", [item["code"] for item in payload["errors"]])
+
+    def test_fallback_collision_does_not_overwrite_racing_destination(self) -> None:
+        import safe_delete.move as move
+        from safe_delete.errors import SafeDeleteError
+
+        source = self.workspace / "source.txt"
+        destination = self.workspace / "destination.txt"
+        source.write_text("source", encoding="utf-8")
+
+        def race(*args: object, **kwargs: object) -> None:
+            destination.write_text("sentinel", encoding="utf-8")
+            raise OSError(errno.EEXIST, "destination appeared")
+
+        with patch.object(move, "_renameat2_noreplace", return_value=move._NO_REPLACE_UNAVAILABLE):
+            with patch.object(move.os, "link", side_effect=race):
+                with self.assertRaises(SafeDeleteError) as raised:
+                    move.atomic_move(source, destination)
+        self.assertEqual(raised.exception.code, "destination_exists")
+        self.assertEqual(source.read_text(encoding="utf-8"), "source")
+        self.assertEqual(destination.read_text(encoding="utf-8"), "sentinel")
+
+    def test_parent_symlink_replacement_keeps_move_on_original_directory_fd(self) -> None:
+        import safe_delete.move as move
+
+        parent = self.workspace / "parent"
+        parked = self.workspace / "parked"
+        external = self.workspace / "external"
+        destination = self.workspace / "trash-payload"
+        parent.mkdir()
+        parked.mkdir()
+        external.mkdir()
+        source = parent / "item.txt"
+        source.write_text("safe", encoding="utf-8")
+        (external / "item.txt").write_text("must stay", encoding="utf-8")
+
+        original_lstat_at = move._lstat_at
+        injected = False
+
+        def replace_parent(fd: int, name: str) -> os.stat_result | None:
+            nonlocal injected
+            result = original_lstat_at(fd, name)
+            if not injected:
+                injected = True
+                os.rename(parent, parked / "parent")
+                parent.symlink_to(external, target_is_directory=True)
+            return result
+
+        with patch.object(move, "_lstat_at", side_effect=replace_parent):
+            move.atomic_move(source, destination)
+        self.assertEqual((external / "item.txt").read_text(encoding="utf-8"), "must stay")
+        self.assertFalse((parked / "parent" / "item.txt").exists())
+        self.assertEqual(destination.read_text(encoding="utf-8"), "safe")
+
+    def test_human_recovery_diagnostics_print_both_paths(self) -> None:
+        import safe_delete.cli as cli
+        from safe_delete.errors import error
+
+        source = str(self.workspace / "source.txt")
+        trash = str(self.storage / "trash" / "objects" / "id" / "payload")
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            cli._emit(
+                "add",
+                [],
+                [error("rollback_failed", "recovery required", source=source, trashed_path=trash)],
+                False,
+            )
+            cli._emit(
+                "list",
+                [],
+                [error("orphan_payload", "orphan", trashed_path=trash)],
+                False,
+            )
+        output = stderr.getvalue()
+        self.assertIn(f"source path: {source}", output)
+        self.assertIn(f"trash path: {trash}", output)
+        self.assertIn("source path: <not recorded>", output)
+
+    def test_fsync_failure_rolls_back_move(self) -> None:
+        self.init_storage()
+        source = self.workspace / "fsync-failure.txt"
+        source.write_text("must survive", encoding="utf-8")
+        import safe_delete.cli as cli
+        import safe_delete.ledger as ledger
+
+        args = Namespace(
+            root=str(self.storage), paths=[str(source)], dry_run=False,
+            reason=None, project=None, session_id=None, agent=None, tool=None,
+        )
+        with patch.object(ledger.os, "fsync", side_effect=OSError(errno.EIO, "injected fsync")):
+            results, errors = cli._handle_add(args)
+        self.assertEqual(results[0]["ok"], False)
+        self.assertEqual(errors[0].code, "ledger_failure")
+        self.assertTrue(source.is_file())
+
+    def test_add_rollback_failure_reports_both_paths(self) -> None:
+        self.init_storage()
+        source = self.workspace / "rollback-failure.txt"
+        source.write_text("quarantine", encoding="utf-8")
+        import safe_delete.cli as cli
+        from safe_delete.errors import SafeDeleteError
+
+        args = Namespace(
+            root=str(self.storage), paths=[str(source)], dry_run=False,
+            reason=None, project=None, session_id=None, agent=None, tool=None,
+        )
+        real_move = cli.atomic_move
+        calls = 0
+
+        def fail_rollback(src: str, dst: str, **kwargs: object) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise SafeDeleteError("storage_failure", "rollback blocked")
+            real_move(src, dst, **kwargs)
+
+        injected = SafeDeleteError("ledger_failure", "append blocked")
+        with patch.object(cli, "append_event", side_effect=injected):
+            with patch.object(cli, "atomic_move", side_effect=fail_rollback):
+                results, errors = cli._handle_add(args)
+        self.assertEqual(results[0]["ok"], False)
+        self.assertEqual(errors[0].code, "rollback_failed")
+        self.assertIn("source", errors[0].details)
+        self.assertIn("trashed_path", errors[0].details)
+
+    def test_restore_exdev_leaves_payload_and_ledger_unchanged(self) -> None:
+        self.init_storage()
+        source = self.workspace / "restore-exdev.txt"
+        source.write_text("content", encoding="utf-8")
+        code, added = run_cli(self.storage, "add", "--", str(source))
+        self.assertEqual(code, 0, added)
+        entry_id = added["results"][0]["entry_id"]
+        payload = Path(added["results"][0]["trashed_path"])
+        import safe_delete.cli as cli
+        import safe_delete.restore as restore
+        from safe_delete.errors import SafeDeleteError
+
+        with patch.object(
+            restore,
+            "atomic_move",
+            side_effect=SafeDeleteError("cross_device", "injected EXDEV"),
+        ):
+            args = Namespace(
+                root=str(self.storage), entry_id=entry_id, restore_to=None,
+                create_parents=False,
+            )
+            results, errors = cli._handle_restore(args)
+            code = errors[0].exit_code if errors else 0
+            failed = {"errors": [item.as_dict() for item in errors], "results": results}
+        self.assertEqual(code, 2, failed)
+        self.assertEqual(failed["errors"][0]["code"], "cross_device")
+        self.assertTrue(payload.is_file())
+        self.assertFalse(source.exists())
+        self.assertEqual(len((self.storage / "ledger.jsonl").read_text().splitlines()), 1)
+
     def test_restore_collision_is_no_overwrite_and_history_is_preserved(self) -> None:
         self.init_storage()
         source = self.workspace / "restore-me.txt"
@@ -248,7 +509,8 @@ class CliContractTests(unittest.TestCase):
         injected = SafeDeleteError("ledger_failure", "injected append failure")
         with patch.object(cli, "append_event", side_effect=injected):
             results, errors = cli._handle_add(args)
-        self.assertEqual(results, [])
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0]["ok"])
         self.assertEqual([item.code for item in errors], ["ledger_failure"])
         self.assertTrue(source.is_file())
         self.assertEqual(source.read_text(encoding="utf-8"), "must survive")
