@@ -411,6 +411,7 @@ def _handle_hook(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteEr
     kwargs = {
         "config": getattr(args, "config", None),
         "project": getattr(args, "project", None),
+        "root": getattr(args, "root", None),
     }
     if args.hook_command == "install":
         result = hook_install(selector, cli_path=getattr(args, "cli_path", None), **kwargs)
