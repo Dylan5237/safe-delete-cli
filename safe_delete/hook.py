@@ -27,7 +27,8 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .errors import FROZEN_ERROR_CODES, SafeDeleteError, error
-from .storage import layout_for, normalized_path, require_layout
+from .metadata import EXTENSIONS_MAX_DEPTH
+from .storage import is_same_or_below, layout_for, normalized_path, require_layout
 
 
 HOOK_PROTOCOL_VERSION = 1
@@ -178,7 +179,9 @@ def _optional_scalar(value: Any, field_name: str) -> str | None:
     return value
 
 
-def _validate_json_value(value: Any, field_name: str) -> None:
+def _validate_json_value(value: Any, field_name: str, *, depth: int = 0) -> None:
+    if depth > EXTENSIONS_MAX_DEPTH:
+        raise ValueError(f"{field_name} is too deeply nested")
     if value is None or isinstance(value, (bool, int)):
         return
     if isinstance(value, float):
@@ -190,14 +193,14 @@ def _validate_json_value(value: Any, field_name: str) -> None:
         return
     if isinstance(value, list):
         for index, item in enumerate(value):
-            _validate_json_value(item, f"{field_name}[{index}]")
+            _validate_json_value(item, f"{field_name}[{index}]", depth=depth + 1)
         return
     if isinstance(value, dict):
         for key, item in value.items():
             if not isinstance(key, str):
                 raise ValueError(f"{field_name} keys must be strings")
             _json_string(key, f"{field_name} key")
-            _validate_json_value(item, f"{field_name}.{key}")
+            _validate_json_value(item, f"{field_name}.{key}", depth=depth + 1)
         return
     raise ValueError(f"{field_name} contains a value that is not JSON")
 
@@ -220,12 +223,15 @@ def _compact_extensions(value: Any) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(value, dict):
         raise ValueError("extensions must be a JSON object")
     _validate_json_value(value, "extensions")
-    compact = json.dumps(
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":"),
-    )
+    try:
+        compact = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+    except RecursionError as exc:
+        raise ValueError("extensions is too deeply nested") from exc
     if len(compact.encode("utf-8")) > 16 * 1024:
         raise ValueError("extensions exceeds its maximum encoded size")
     return value, compact
@@ -243,7 +249,7 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def _decode_json_payload(payload: str | bytes) -> Any:
     try:
         return json.loads(payload, object_pairs_hook=_reject_duplicate_keys)
-    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, TypeError, ValueError) as exc:
         raise ValueError("request is not valid UTF-8 JSON") from exc
 
 
@@ -362,6 +368,23 @@ def _absolute_operand(cwd: str, operand: str) -> str:
         raise ValueError(exc.message) from exc
 
 
+def _cwd_is_usable(cwd: str) -> bool:
+    """Require a real, readable/searchable directory at the decision boundary."""
+
+    try:
+        item = os.stat(cwd)
+    except OSError:
+        return False
+    if not stat.S_ISDIR(item.st_mode):
+        return False
+    mode = stat.S_IMODE(item.st_mode)
+    if not (mode & (stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)):
+        return False
+    if not (mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)):
+        return False
+    return os.access(cwd, os.R_OK | os.X_OK)
+
+
 def _route_response(request: HookRequest, operands: Sequence[str], *, adapter: str) -> dict[str, Any]:
     if adapter == "pretooluse":
         tool_identity = f"pretooluse:{request.tool}"
@@ -409,6 +432,11 @@ def decide_request(
         request = parse_request(payload)
         if adapter == "path-shim" and command is not None and request.argv[0] != command:
             raise ValueError("path-shim argv[0] does not match its selected command")
+        if not _cwd_is_usable(request.cwd):
+            return _deny(
+                payload,
+                message="invocation cwd is unavailable; deletion was not executed.",
+            )
         classification, operands = _classify_argv(request.argv)
         if classification == "safe_delete_add":
             return _passthrough(request, "safe_delete_add")
@@ -417,7 +445,7 @@ def decide_request(
         if classification != "raw_delete" or operands is None:
             return _deny(payload)
         return _route_response(request, operands, adapter=adapter)
-    except (ValueError, TypeError, OSError):
+    except (ValueError, TypeError, OSError, RecursionError):
         return _deny(payload)
 
 
@@ -563,11 +591,7 @@ def _write_bytes_atomic(path: Path, content: bytes, *, mode: int = 0o700) -> Non
 
 
 def _write_json_atomic(path: Path, value: Mapping[str, Any]) -> None:
-    try:
-        encoded = (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-    except (TypeError, ValueError, UnicodeEncodeError) as exc:
-        raise error("storage_failure", f"cannot encode hook configuration: {path}", path=str(path)) from exc
-    _write_bytes_atomic(path, encoded, mode=0o600)
+    _write_bytes_atomic(path, _json_bytes(value, path), mode=0o600)
 
 
 def _read_registry() -> tuple[dict[str, Any], bool]:
@@ -677,6 +701,55 @@ def _owned_file(path: Path) -> bool:
     return _OWNER_MARKER in first_lines
 
 
+def _payload_source_root(path: Path) -> Path | None:
+    """Read the source dependency captured in a generated payload."""
+
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return None
+    prefix = "sys.path.insert(0, "
+    for line in lines:
+        if not line.startswith(prefix) or not line.endswith(")"):
+            continue
+        try:
+            value = json.loads(line[len(prefix) : -1])
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+        if isinstance(value, str) and value:
+            return Path(value)
+        return None
+    return None
+
+
+def _payload_runnable(path: Path) -> bool:
+    """Prove the generated launcher can still import its implementation."""
+
+    if not _runnable(path) or not _owned_file(path):
+        return False
+    source_root = _payload_source_root(path)
+    if source_root is None or not source_root.is_dir():
+        return False
+    package = source_root / "safe_delete"
+    if not (package / "__init__.py").is_file() or not (package / "hook.py").is_file():
+        return False
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(source_root)
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", "import safe_delete.hook"],
+            cwd=str(source_root),
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
+
+
 def _install_owned_file(path: Path, content: bytes) -> bool:
     existing = _safe_lstat(path)
     if existing is not None:
@@ -702,6 +775,106 @@ def _path_value(raw: str | os.PathLike[str], field_name: str) -> Path:
     absolute = os.path.abspath(value)
     parent, basename = os.path.split(absolute)
     return Path(os.path.normpath(os.path.join(os.path.realpath(parent), basename)))
+
+
+def _management_paths(spec: IntegrationSpec) -> tuple[Path, ...]:
+    paths = package_paths()
+    managed = [paths["root"], paths["hooks"], paths["registry"]]
+    if spec.mode == "pretooluse":
+        managed.append(paths["pretooluse"])
+        if spec.config_path is not None:
+            managed.append(spec.config_path)
+    else:
+        managed.append(paths["bin"])
+    return tuple(managed)
+
+
+def _reject_storage_namespace(spec: IntegrationSpec, explicit_root: str | None) -> None:
+    """Keep package and host configuration bytes outside runtime storage."""
+
+    layout = layout_for(explicit_root)
+    reserved = (layout.root, layout.trash, layout.ledger, layout.lock)
+    for raw_path in _management_paths(spec):
+        candidate = _path_value(raw_path, "hook path")
+        for reserved_path in reserved:
+            if is_same_or_below(candidate, reserved_path):
+                raise error(
+                    "path_forbidden",
+                    f"hook management path is inside safe-delete storage: {candidate}",
+                    path=str(candidate),
+                    storage_path=str(reserved_path),
+                )
+
+
+@dataclass(frozen=True)
+class _FileSnapshot:
+    path: Path
+    exists: bool
+    content: bytes | None
+    mode: int | None
+
+
+def _snapshot_file(path: Path) -> _FileSnapshot:
+    item = _safe_lstat(path)
+    if item is None:
+        return _FileSnapshot(path, False, None, None)
+    if stat.S_ISLNK(item.st_mode) or not stat.S_ISREG(item.st_mode):
+        raise error("storage_failure", f"hook path is not a regular file: {path}", path=str(path))
+    try:
+        content = path.read_bytes()
+    except OSError as exc:
+        raise error("storage_failure", f"cannot read hook path: {path}", path=str(path), errno=exc.errno) from exc
+    return _FileSnapshot(path, True, content, stat.S_IMODE(item.st_mode))
+
+
+def _json_bytes(value: Mapping[str, Any], path: Path) -> bytes:
+    try:
+        return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise error("storage_failure", f"cannot encode hook configuration: {path}", path=str(path)) from exc
+
+
+class _FileTransaction:
+    """Restore every management file if a multi-file operation fails."""
+
+    def __init__(self, paths: Sequence[Path]) -> None:
+        self.snapshots = {path: _snapshot_file(path) for path in dict.fromkeys(paths)}
+        self.expected: dict[Path, bytes] = {}
+
+    def expect(self, path: Path, content: bytes) -> None:
+        self.expected[path] = content
+
+    def rollback(self) -> None:
+        failures: list[str] = []
+        for snapshot in reversed(tuple(self.snapshots.values())):
+            try:
+                current = _safe_lstat(snapshot.path)
+                if snapshot.exists:
+                    if current is None or stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode):
+                        raise OSError("hook path was replaced during rollback")
+                    if snapshot.content is not None and snapshot.path.read_bytes() != snapshot.content:
+                        _write_bytes_atomic(
+                            snapshot.path,
+                            snapshot.content,
+                            mode=snapshot.mode or 0o600,
+                        )
+                else:
+                    if current is None:
+                        continue
+                    if stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode):
+                        raise OSError("new hook path is not a regular file")
+                    expected = self.expected.get(snapshot.path)
+                    if expected is None or snapshot.path.read_bytes() != expected:
+                        raise OSError("new hook path changed before rollback")
+                    snapshot.path.unlink()
+            except (OSError, SafeDeleteError) as exc:
+                failures.append(f"{snapshot.path}: {exc}")
+        if failures:
+            raise error(
+                "storage_failure",
+                "hook management transaction rollback failed",
+                paths=failures,
+            )
 
 
 def select_integration(
@@ -855,7 +1028,10 @@ def _remove_host_registration(config: dict[str, Any], spec: IntegrationSpec) -> 
 def _storage_status(explicit_root: str | None = None) -> dict[str, Any]:
     try:
         layout = require_layout(explicit_root)
-        writable = all(_mode_writable(path) for path in (layout.root, layout.objects, layout.ledger, layout.lock))
+        writable = all(
+            _mode_writable(path)
+            for path in (layout.root, layout.trash, layout.objects, layout.ledger, layout.lock)
+        )
         if not writable:
             return {
                 "root": str(layout.root),
@@ -909,11 +1085,11 @@ def _path_precedence(bin_dir: Path) -> bool:
 def _package_file_status(spec: IntegrationSpec) -> dict[str, Any]:
     if spec.mode == "path-shim":
         files = {
-            command: _runnable(spec.bin_dir / command) and _owned_file(spec.bin_dir / command)
+            command: _payload_runnable(spec.bin_dir / command)
             for command in sorted(HOOK_COMMANDS)
         }
         return {"files": files, "complete": all(files.values()), "path_precedence": _path_precedence(spec.bin_dir)}
-    owned = _runnable(spec.adapter_path) and _owned_file(spec.adapter_path)
+    owned = _payload_runnable(spec.adapter_path)
     return {"adapter_path": str(spec.adapter_path), "adapter_runnable": owned}
 
 
@@ -929,25 +1105,101 @@ def _registered_spec(spec: IntegrationSpec, entry: Mapping[str, Any] | None) -> 
     return spec
 
 
+def _registry_entry_matches(spec: IntegrationSpec, entry: Mapping[str, Any] | None) -> bool:
+    if not isinstance(entry, Mapping):
+        return False
+    if (
+        entry.get("selector") != spec.selector
+        or entry.get("mode") != spec.mode
+        or entry.get("protocol_version") != HOOK_PROTOCOL_VERSION
+        or entry.get("adapter_path") != str(spec.adapter_path)
+        or entry.get("event_key") != spec.event_key
+        or entry.get("bin_dir") != str(spec.bin_dir)
+        or not isinstance(entry.get("enabled"), bool)
+        or not isinstance(entry.get("cli_path"), str)
+        or not entry.get("cli_path")
+    ):
+        return False
+    if spec.mode == "pretooluse":
+        return entry.get("config_path") == str(spec.config_path)
+    return entry.get("config_path") is None
+
+
+def _package_files(spec: IntegrationSpec) -> list[Path]:
+    if spec.mode == "pretooluse":
+        return [spec.adapter_path]
+    return [spec.bin_dir / command for command in HOOK_COMMANDS]
+
+
+def _package_files_are_owned(spec: IntegrationSpec) -> bool:
+    for path in _package_files(spec):
+        item = _safe_lstat(path)
+        if item is None or not _owned_file(path):
+            return False
+    return True
+
+
+def _management_artifacts_present(spec: IntegrationSpec) -> bool:
+    if any(_safe_lstat(path) is not None for path in _package_files(spec)):
+        return True
+    if spec.mode == "pretooluse" and spec.config_path is not None:
+        try:
+            config, exists = _load_json_object(spec.config_path, missing_ok=True)
+        except SafeDeleteError:
+            return True
+        return exists and _has_host_registration(config, spec)
+    return False
+
+
+def _owned_management_spec(
+    selector: str | None,
+    *,
+    config: str | os.PathLike[str] | None,
+    project: str | os.PathLike[str] | None,
+    root: str | None,
+    registry: Mapping[str, Any],
+) -> tuple[IntegrationSpec, dict[str, Any] | None]:
+    requested = select_integration(selector, config=config, project=project)
+    _reject_storage_namespace(requested, root)
+    integrations = registry.get("integrations", {})
+    raw_entry = integrations.get(requested.selector) if isinstance(integrations, dict) else None
+    if raw_entry is not None and not isinstance(raw_entry, dict):
+        raise error(
+            "storage_failure",
+            "hook registry entry ownership cannot be proven",
+            selector=requested.selector,
+        )
+    entry = raw_entry if isinstance(raw_entry, dict) else None
+    if entry is None:
+        if _management_artifacts_present(requested):
+            raise error(
+                "storage_failure",
+                "hook integration is present without a provable registry owner",
+                selector=requested.selector,
+            )
+        return requested, None
+    spec = requested if config is not None or project is not None else _registered_spec(requested, entry)
+    if not _registry_entry_matches(spec, entry):
+        raise error(
+            "storage_failure",
+            "hook configuration does not match the recorded integration boundary",
+            selector=spec.selector,
+        )
+    _reject_storage_namespace(spec, root)
+    if not _package_files_are_owned(spec):
+        raise error(
+            "storage_failure",
+            "hook package ownership cannot be proven",
+            selector=spec.selector,
+        )
+    return spec, entry
+
+
 def _status_one(spec: IntegrationSpec, registry: Mapping[str, Any], *, root: str | None = None) -> dict[str, Any]:
     integrations = registry.get("integrations", {})
     entry = integrations.get(spec.selector) if isinstance(integrations, dict) else None
     enabled = bool(isinstance(entry, dict) and entry.get("enabled") is True)
-    registry_valid = bool(
-        isinstance(entry, dict)
-        and entry.get("selector") == spec.selector
-        and entry.get("mode") == spec.mode
-        and entry.get("protocol_version") == HOOK_PROTOCOL_VERSION
-        and entry.get("adapter_path") == str(spec.adapter_path)
-        and entry.get("event_key") == spec.event_key
-        and entry.get("bin_dir") == str(spec.bin_dir)
-        and isinstance(entry.get("cli_path"), str)
-        and bool(entry.get("cli_path"))
-    )
-    if spec.mode == "pretooluse":
-        registry_valid = registry_valid and isinstance(entry, dict) and entry.get("config_path") == str(spec.config_path)
-    else:
-        registry_valid = registry_valid and isinstance(entry, dict) and entry.get("config_path") is None
+    registry_valid = _registry_entry_matches(spec, entry)
     cli = resolve_cli(entry.get("cli_path") if isinstance(entry, dict) else None)
     package_status = _package_file_status(spec)
     config_exists = False
@@ -1044,42 +1296,81 @@ def hook_install(
     root: str | None = None,
 ) -> dict[str, Any]:
     spec = select_integration(selector, config=config, project=project)
+    _reject_storage_namespace(spec, root)
     resolved_cli = resolve_cli(cli_path)
     if resolved_cli is None:
         raise error("storage_failure", "safe-delete CLI is unavailable; installation is not enabled")
+    registry, _ = _read_registry()
+    existing_entry = _raw_registry_entry_for(spec, registry)
+    if existing_entry is not None:
+        if not isinstance(existing_entry, dict):
+            raise error(
+                "storage_failure",
+                "hook registry entry ownership cannot be proven",
+                selector=spec.selector,
+            )
+        if config is None and project is None:
+            spec = _registered_spec(spec, existing_entry)
+        if not _registry_entry_matches(spec, existing_entry):
+            raise error(
+                "storage_failure",
+                "hook configuration does not match the recorded integration boundary",
+                selector=spec.selector,
+            )
+        _reject_storage_namespace(spec, root)
     host_config: dict[str, Any] | None = None
     host_exists = False
     if spec.mode == "pretooluse":
         host_config, host_exists = _ensure_host_config(spec)
-    registry, _ = _read_registry()
     integrations = registry.setdefault("integrations", {})
     if not isinstance(integrations, dict):  # defensive after registry validation
         raise error("storage_failure", "hook registry integrations must be an object")
 
-    created_files: list[Path] = []
+    package_files = (
+        [spec.adapter_path]
+        if spec.mode == "pretooluse"
+        else [spec.bin_dir / command for command in HOOK_COMMANDS]
+    )
+    transaction_paths = [*package_files, hook_registry_path()]
+    if spec.config_path is not None:
+        transaction_paths.append(spec.config_path)
+    transaction = _FileTransaction(transaction_paths)
     changed = False
     changed_host = False
     try:
         if spec.mode == "pretooluse":
             assert host_config is not None
-            adapter_was_present = _safe_lstat(spec.adapter_path) is not None
-            if _install_owned_file(spec.adapter_path, _payload_text("pretooluse")):
+            adapter_payload = _payload_text("pretooluse")
+            transaction.expect(spec.adapter_path, adapter_payload)
+            if _install_owned_file(spec.adapter_path, adapter_payload):
                 changed = True
-                if not adapter_was_present:
-                    created_files.append(spec.adapter_path)
+            package_status = _package_file_status(spec)
+            if not package_status["adapter_runnable"]:
+                raise error(
+                    "storage_failure",
+                    "installed hook adapter payload is not runnable",
+                    path=str(spec.adapter_path),
+                )
             changed_host = _add_host_registration(host_config, spec)
             changed = changed or changed_host
             if changed_host or not host_exists:
                 assert spec.config_path is not None
+                transaction.expect(spec.config_path, _json_bytes(host_config, spec.config_path))
                 _write_json_atomic(spec.config_path, host_config)
         else:
             for command in sorted(HOOK_COMMANDS):
                 path = spec.bin_dir / command
-                was_present = _safe_lstat(path) is not None
-                if _install_owned_file(path, _payload_text("path-shim", command)):
+                payload = _payload_text("path-shim", command)
+                transaction.expect(path, payload)
+                if _install_owned_file(path, payload):
                     changed = True
-                    if not was_present:
-                        created_files.append(path)
+            package_status = _package_file_status(spec)
+            if not package_status["complete"]:
+                raise error(
+                    "storage_failure",
+                    "installed PATH shim payload is not runnable",
+                    path=str(spec.bin_dir),
+                )
         desired_entry = {
             "selector": spec.selector,
             "mode": spec.mode,
@@ -1094,16 +1385,13 @@ def hook_install(
         if integrations.get(spec.selector) != desired_entry:
             integrations[spec.selector] = desired_entry
             changed = True
+            transaction.expect(hook_registry_path(), _json_bytes(registry, hook_registry_path()))
             _write_registry(registry)
-    except Exception:
-        # A package payload is harmless but should not be left as an apparently
-        # installed integration when registration itself failed.  Never remove
-        # a file that existed before this transaction.
-        for path in created_files:
-            try:
-                path.unlink()
-            except OSError:
-                pass
+    except Exception as exc:
+        try:
+            transaction.rollback()
+        except SafeDeleteError as rollback_error:
+            raise rollback_error from exc
         raise
     result = _status_one(spec, registry, root=root)
     result["changed"] = changed
@@ -1112,11 +1400,15 @@ def hook_install(
     return result
 
 
-def _registry_entry_for(spec: IntegrationSpec, registry: Mapping[str, Any]) -> dict[str, Any] | None:
+def _raw_registry_entry_for(spec: IntegrationSpec, registry: Mapping[str, Any]) -> Any:
     integrations = registry.get("integrations", {})
     if not isinstance(integrations, dict):
         return None
-    value = integrations.get(spec.selector)
+    return integrations.get(spec.selector)
+
+
+def _registry_entry_for(spec: IntegrationSpec, registry: Mapping[str, Any]) -> dict[str, Any] | None:
+    value = _raw_registry_entry_for(spec, registry)
     return value if isinstance(value, dict) else None
 
 
@@ -1127,12 +1419,22 @@ def hook_disable(
     project: str | os.PathLike[str] | None = None,
     root: str | None = None,
 ) -> dict[str, Any]:
-    spec = select_integration(selector, config=config, project=project)
     registry, _ = _read_registry()
-    entry = _registry_entry_for(spec, registry)
-    spec = _registered_spec(spec, entry) if config is None and project is None else spec
-    was_enabled = bool(entry and entry.get("enabled"))
+    spec, entry = _owned_management_spec(
+        selector,
+        config=config,
+        project=project,
+        root=root,
+        registry=registry,
+    )
+    if entry is None:
+        result = _status_one(spec, registry, root=root)
+        result["changed"] = False
+        result["raw_delete_outside_boundary"] = True
+        return result
+    was_enabled = entry["enabled"] is True
     changed_host = False
+    host_config: dict[str, Any] | None = None
     if spec.mode == "pretooluse" and spec.config_path is not None:
         host_config, exists = _load_json_object(spec.config_path, missing_ok=True)
         if exists:
@@ -1143,14 +1445,26 @@ def hook_disable(
             if changed_host:
                 if not _mode_writable(spec.config_path):
                     raise error("storage_failure", f"host configuration is not writable: {spec.config_path}", path=str(spec.config_path))
-                _write_json_atomic(spec.config_path, host_config)
-    if entry is not None:
-        updated_entry = dict(entry)
-        updated_entry["enabled"] = False
+    transaction_paths = [*(_package_files(spec)), hook_registry_path()]
+    if spec.config_path is not None:
+        transaction_paths.append(spec.config_path)
+    transaction = _FileTransaction(transaction_paths)
+    updated_entry = dict(entry)
+    updated_entry["enabled"] = False
+    try:
+        if changed_host and host_config is not None and spec.config_path is not None:
+            transaction.expect(spec.config_path, _json_bytes(host_config, spec.config_path))
+            _write_json_atomic(spec.config_path, host_config)
         registry["integrations"][spec.selector] = updated_entry
         if was_enabled:
+            transaction.expect(hook_registry_path(), _json_bytes(registry, hook_registry_path()))
             _write_registry(registry)
-        entry = updated_entry
+    except Exception as exc:
+        try:
+            transaction.rollback()
+        except SafeDeleteError as rollback_error:
+            raise rollback_error from exc
+        raise
     result = _status_one(spec, registry, root=root)
     result["changed"] = was_enabled or changed_host
     result["raw_delete_outside_boundary"] = True
@@ -1177,43 +1491,59 @@ def hook_uninstall(
     project: str | os.PathLike[str] | None = None,
     root: str | None = None,
 ) -> dict[str, Any]:
-    spec = select_integration(selector, config=config, project=project)
     registry, _ = _read_registry()
-    entry = _registry_entry_for(spec, registry)
-    spec = _registered_spec(spec, entry) if config is None and project is None else spec
+    spec, entry = _owned_management_spec(
+        selector,
+        config=config,
+        project=project,
+        root=root,
+        registry=registry,
+    )
+    if entry is None:
+        result = _status_one(spec, registry, root=root)
+        result["changed"] = False
+        result["raw_delete_outside_boundary"] = True
+        return result
 
     # Prove package ownership before changing the registry.  Host config is
     # also validated before any package file is removed.
     host_config: dict[str, Any] | None = None
-    host_exists = False
     host_changed = False
     if spec.mode == "pretooluse" and spec.config_path is not None:
-        host_config, host_exists = _load_json_object(spec.config_path, missing_ok=True)
-        if host_exists:
+        host_config, exists = _load_json_object(spec.config_path, missing_ok=True)
+        if exists:
             try:
                 host_changed = _remove_host_registration(host_config, spec)
             except ValueError as exc:
                 raise error("storage_failure", f"host configuration is ambiguous: {spec.config_path}", path=str(spec.config_path)) from exc
             if host_changed and not _mode_writable(spec.config_path):
                 raise error("storage_failure", f"host configuration is not writable: {spec.config_path}", path=str(spec.config_path))
-    package_files = (
-        [spec.adapter_path]
-        if spec.mode == "pretooluse"
-        else [spec.bin_dir / command for command in HOOK_COMMANDS]
-    )
+    package_files = _package_files(spec)
     package_present = any(_safe_lstat(path) is not None for path in package_files)
     for path in package_files:
         item = _safe_lstat(path)
         if item is not None and not _owned_file(path):
             raise error("storage_failure", f"refusing to remove unowned hook file: {path}", path=str(path))
 
-    if host_changed and host_config is not None and spec.config_path is not None:
-        _write_json_atomic(spec.config_path, host_config)
-    for path in package_files:
-        _remove_owned_file(path)
-    if entry is not None:
+    transaction_paths = [*package_files, hook_registry_path()]
+    if spec.config_path is not None:
+        transaction_paths.append(spec.config_path)
+    transaction = _FileTransaction(transaction_paths)
+    try:
+        if host_changed and host_config is not None and spec.config_path is not None:
+            transaction.expect(spec.config_path, _json_bytes(host_config, spec.config_path))
+            _write_json_atomic(spec.config_path, host_config)
+        for path in package_files:
+            _remove_owned_file(path)
         registry["integrations"].pop(spec.selector, None)
+        transaction.expect(hook_registry_path(), _json_bytes(registry, hook_registry_path()))
         _write_registry(registry)
+    except Exception as exc:
+        try:
+            transaction.rollback()
+        except SafeDeleteError as rollback_error:
+            raise rollback_error from exc
+        raise
     result = _status_one(spec, registry, root=root)
     result["changed"] = bool(entry or host_changed or package_present)
     result["raw_delete_outside_boundary"] = True
@@ -1252,8 +1582,7 @@ def _integration_is_registered(adapter: str) -> bool:
             and isinstance(entry.get("cli_path"), str)
             and bool(entry.get("cli_path"))
             and all(
-                _runnable(spec.bin_dir / command)
-                and _owned_file(spec.bin_dir / command)
+                _payload_runnable(spec.bin_dir / command)
                 for command in HOOK_COMMANDS
             )
         )
@@ -1286,8 +1615,7 @@ def _integration_is_registered(adapter: str) -> bool:
             config, exists = _load_json_object(spec.config_path, missing_ok=True)
             if (
                 exists
-                and _runnable(spec.adapter_path)
-                and _owned_file(spec.adapter_path)
+                and _payload_runnable(spec.adapter_path)
                 and _has_host_registration(config, spec)
             ):
                 return True
@@ -1382,9 +1710,13 @@ def _child_environment(
             if Path(os.path.abspath(entry or os.curdir)) != shim_dir
         ]
     if cli_path is not None:
-        cli_parent = str(cli_path.parent)
-        if cli_parent not in entries:
-            entries.insert(0, cli_parent)
+        cli_parent = os.path.normpath(os.path.abspath(str(cli_path.parent)))
+        entries = [
+            entry
+            for entry in entries
+            if os.path.normpath(os.path.abspath(entry or os.curdir)) != cli_parent
+        ]
+        entries.insert(0, cli_parent)
     environment["PATH"] = os.pathsep.join(entries)
     return environment
 
@@ -1512,7 +1844,7 @@ def execute_request(
 
     try:
         request = parse_request(payload)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         return HookExecution(_deny(payload), 1, executed=False)
 
     response = decide_request(_request_mapping(request), adapter=adapter, command=command)
@@ -1540,13 +1872,17 @@ def execute_request(
     safe_delete_child = decision == "route" or response.get("reason_code") == "safe_delete_add"
     resolved_cli: Path | None = None
     if safe_delete_child:
-        resolved_cli = resolve_cli(cli_path)
         if (
-            resolved_cli is None
+            decision == "route"
+            and require_registration
             and cli_path is None
-            and "SAFE_DELETE_CLI" not in os.environ
+            and not os.environ.get("SAFE_DELETE_CLI")
         ):
+            # A registered integration captures the exact CLI selected at
+            # install time.  Do not let a later PATH shadow replace it.
             resolved_cli = _registered_cli_path(adapter)
+        else:
+            resolved_cli = resolve_cli(cli_path)
         if resolved_cli is None:
             return _unavailable_execution(
                 request,
@@ -1567,7 +1903,8 @@ def execute_request(
         remove_shim_dir=adapter == "path-shim" and not safe_delete_child,
     )
     if decision == "route":
-        child_argv = response["safe_delete_argv"]
+        child_argv = list(response["safe_delete_argv"])
+        child_argv[0] = str(resolved_cli)
     else:
         child_argv = list(request.argv)
     try:

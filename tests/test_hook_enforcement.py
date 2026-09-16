@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from safe_delete.errors import SafeDeleteError
 from safe_delete.hook import (
     OUT_OF_COVERAGE_BYPASSES,
     decide_request,
@@ -21,6 +22,7 @@ from safe_delete.hook import (
     hook_uninstall,
     package_paths,
 )
+from safe_delete.metadata import EXTENSIONS_MAX_DEPTH
 from safe_delete.storage import initialize_layout
 
 
@@ -208,7 +210,7 @@ class HookEnforcementTests(unittest.TestCase):
         self.assertEqual(child_cwd, str(self.workspace))
         self.assertEqual(
             child_argv,
-            ["safe-delete", "add", "--tool", "pretooluse:shell", "--", str(self.workspace / "item")],
+            [str(CLI), "add", "--tool", "pretooluse:shell", "--", str(self.workspace / "item")],
         )
 
     def test_nonzero_cli_is_denied_and_has_no_raw_fallback(self) -> None:
@@ -227,7 +229,7 @@ class HookEnforcementTests(unittest.TestCase):
         self.assertEqual(response.response["reason_code"], "source_not_found")
         self.assertEqual(response.exit_code, 2)
         self.assertEqual(len(runner.calls), 1)
-        self.assertEqual(runner.calls[0][0][0], "safe-delete")
+        self.assertEqual(runner.calls[0][0][0], str(CLI))
 
     def test_cross_device_cli_error_is_propagated_without_raw_fallback(self) -> None:
         initialize_layout(str(self.storage))
@@ -513,6 +515,200 @@ class HookEnforcementTests(unittest.TestCase):
         self.assertFalse(package_paths()["pretooluse"].exists())
         registry = json.loads(hook_registry_path().read_text(encoding="utf-8"))
         self.assertNotIn("claude", registry["integrations"])
+
+    def test_install_rejects_storage_namespace_and_preserves_runtime_bytes(self) -> None:
+        initialize_layout(str(self.storage))
+        ledger = self.storage / "ledger.jsonl"
+        lock = self.storage / "locks" / "ledger.lock"
+        sentinel = self.storage / "trash" / "sentinel"
+        ledger.write_bytes(b"ledger bytes\n")
+        lock.write_bytes(b"lock bytes\n")
+        sentinel.write_bytes(b"trash bytes\n")
+        watched = (ledger, lock, sentinel)
+        before = {path: path.read_bytes() for path in watched}
+
+        with patch.dict(os.environ, {"XDG_DATA_HOME": str(self.storage / "trash")}, clear=False):
+            with self.assertRaises(SafeDeleteError):
+                hook_install("path-shim", cli_path=str(CLI), root=str(self.storage))
+
+        for path, content in before.items():
+            self.assertEqual(path.read_bytes(), content)
+        self.assertFalse((self.storage / "trash" / "safe-delete").exists())
+
+        for reserved in (ledger, lock):
+            with self.subTest(reserved=reserved):
+                with self.assertRaises(SafeDeleteError):
+                    hook_install("claude", config=str(reserved), cli_path=str(CLI), root=str(self.storage))
+                self.assertEqual(ledger.read_bytes(), before[ledger])
+                self.assertEqual(lock.read_bytes(), before[lock])
+                self.assertEqual(sentinel.read_bytes(), before[sentinel])
+
+    def test_install_registry_failure_rolls_back_package_and_host_registration(self) -> None:
+        initialize_layout(str(self.storage))
+        config = self.base / "claude.json"
+        failure = SafeDeleteError("storage_failure", "injected registry write failure")
+        with patch("safe_delete.hook._write_registry", side_effect=failure):
+            with self.assertRaises(SafeDeleteError):
+                hook_install("claude", config=str(config), cli_path=str(CLI), root=str(self.storage))
+
+        self.assertFalse(config.exists())
+        self.assertFalse(package_paths()["pretooluse"].exists())
+        self.assertFalse(hook_registry_path().exists())
+
+    def test_install_missing_payload_fails_before_host_registration(self) -> None:
+        initialize_layout(str(self.storage))
+        config = self.base / "claude.json"
+        with patch("safe_delete.hook._install_owned_file", return_value=False):
+            with self.assertRaises(SafeDeleteError):
+                hook_install("claude", config=str(config), cli_path=str(CLI), root=str(self.storage))
+        self.assertFalse(config.exists())
+        self.assertFalse(hook_registry_path().exists())
+
+    def test_disable_and_uninstall_refuse_wrong_config_or_unowned_registry(self) -> None:
+        initialize_layout(str(self.storage))
+        configured = self.base / "configured.json"
+        wrong = self.base / "wrong.json"
+        hook_install("claude", config=str(configured), cli_path=str(CLI), root=str(self.storage))
+        registry_before = hook_registry_path().read_bytes()
+        config_before = configured.read_bytes()
+
+        with self.assertRaises(SafeDeleteError):
+            hook_disable("claude", config=str(wrong), root=str(self.storage))
+        with self.assertRaises(SafeDeleteError):
+            hook_uninstall("claude", config=str(wrong), root=str(self.storage))
+        self.assertEqual(configured.read_bytes(), config_before)
+        self.assertEqual(hook_registry_path().read_bytes(), registry_before)
+        self.assertFalse(wrong.exists())
+
+        registry = json.loads(registry_before.decode("utf-8"))
+        registry["integrations"]["claude"]["adapter_path"] = str(self.base / "foreign-adapter")
+        hook_registry_path().write_text(json.dumps(registry), encoding="utf-8")
+        unowned_registry = hook_registry_path().read_bytes()
+        with self.assertRaises(SafeDeleteError):
+            hook_disable("claude", config=str(configured), root=str(self.storage))
+        self.assertEqual(hook_registry_path().read_bytes(), unowned_registry)
+
+    def test_route_pins_registered_cli_against_shadowed_path(self) -> None:
+        initialize_layout(str(self.storage))
+        hook_install("claude", config=str(self.base / "claude.json"), cli_path=str(CLI), root=str(self.storage))
+        shadow = self.base / "shadow"
+        shadow.mkdir()
+        marker = self.base / "shadow-used"
+        shadow_cli = shadow / "safe-delete"
+        shadow_cli.write_text(f"#!/bin/sh\nprintf used > {marker}\nexit 0\n", encoding="utf-8")
+        shadow_cli.chmod(0o700)
+        environment = dict(os.environ)
+        environment["PATH"] = str(shadow) + os.pathsep + environment.get("PATH", "")
+        target = self.workspace / "missing"
+        result = execute_request(
+            self.request(["rm", str(target)]),
+            environment=environment,
+        )
+        self.assertEqual(result.response["reason_code"], "source_not_found")
+        self.assertEqual(result.exit_code, 2)
+        self.assertFalse(marker.exists())
+
+    def test_status_rejects_relocated_or_broken_payload_dependency(self) -> None:
+        initialize_layout(str(self.storage))
+        hook_install("claude", config=str(self.base / "claude.json"), cli_path=str(CLI), root=str(self.storage))
+        adapter = package_paths()["pretooluse"]
+        lines = adapter.read_text(encoding="utf-8").splitlines()
+        lines = [
+            'sys.path.insert(0, "/missing/relocated/safe-delete-source")' if line.startswith("sys.path.insert(0, ") else line
+            for line in lines
+        ]
+        adapter.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        status = hook_status("claude", root=str(self.storage))[0]
+        self.assertFalse(status["package"]["adapter_runnable"])
+        self.assertFalse(status["enforced"])
+
+    def test_deep_extensions_are_stable_denials_at_both_hook_boundaries(self) -> None:
+        extensions: dict[str, object] = {}
+        cursor: dict[str, object] = extensions
+        for _ in range(EXTENSIONS_MAX_DEPTH + 8):
+            nested: dict[str, object] = {}
+            cursor["nested"] = nested
+            cursor = nested
+        payload = self.request(["rm", "item"], extensions=extensions)
+        decision = decide_request(payload)
+        self.assertEqual(decision["decision"], "deny")
+        self.assertEqual(decision["reason_code"], "unsupported_delete_invocation")
+
+        runner = RecordingRunner()
+        execution = execute_request(payload, runner=runner, require_registration=False)
+        self.assertEqual(execution.response["decision"], "deny")
+        self.assertEqual(execution.exit_code, 1)
+        self.assertEqual(runner.calls, [])
+
+    def test_status_storage_gate_includes_trash_writability(self) -> None:
+        initialize_layout(str(self.storage))
+        hook_install("claude", config=str(self.base / "claude.json"), cli_path=str(CLI), root=str(self.storage))
+        trash = self.storage / "trash"
+        original_mode = trash.stat().st_mode & 0o777
+        trash.chmod(0o500)
+        try:
+            status = hook_status("claude", root=str(self.storage))[0]
+            self.assertFalse(status["storage"]["usable"])
+            self.assertFalse(status["enforced"])
+        finally:
+            trash.chmod(original_mode)
+
+    def test_decide_denies_missing_non_directory_and_inaccessible_cwd(self) -> None:
+        missing = self.request(["rm", "item"], cwd=str(self.base / "missing-cwd"))
+        self.assertEqual(decide_request(missing)["decision"], "deny")
+
+        file_cwd = self.base / "cwd-file"
+        file_cwd.write_text("not a directory", encoding="utf-8")
+        self.assertEqual(
+            decide_request(self.request(["rm", "item"], cwd=str(file_cwd)))["decision"],
+            "deny",
+        )
+
+        inaccessible = self.base / "inaccessible-cwd"
+        inaccessible.mkdir()
+        original_mode = inaccessible.stat().st_mode & 0o777
+        inaccessible.chmod(0)
+        try:
+            self.assertEqual(decide_request(self.request(["rm", "item"], cwd=str(inaccessible)))["decision"], "deny")
+        finally:
+            inaccessible.chmod(original_mode)
+
+    def test_installed_pretooluse_payload_routes_real_request(self) -> None:
+        initialize_layout(str(self.storage))
+        hook_install("claude", config=str(self.base / "claude.json"), cli_path=str(CLI), root=str(self.storage))
+        target = self.workspace / "pretooluse-target"
+        target.write_text("payload", encoding="utf-8")
+        request = self.request(["rm", "--", str(target)])
+        completed = subprocess.run(
+            [str(package_paths()["pretooluse"])] ,
+            input=json.dumps(request).encode("utf-8"),
+            cwd=str(self.workspace),
+            env=dict(os.environ),
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
+        response = json.loads(completed.stdout.decode("utf-8"))
+        self.assertEqual(response["decision"], "route")
+        self.assertFalse(target.exists())
+        self.assertEqual(len((self.storage / "ledger.jsonl").read_text(encoding="utf-8").splitlines()), 1)
+
+    def test_bypass_replay_is_documented_as_out_of_coverage(self) -> None:
+        representative_vectors = {
+            "Python/Go/Node filesystem APIs": ["python", "-c", "import os; os.unlink('item')"],
+            "find -delete": ["find", ".", "-delete"],
+            "git clean": ["git", "clean", "-fd"],
+            "busybox rm": ["busybox", "rm", "item"],
+            "absolute /bin/rm, /bin/unlink, or /bin/rmdir": ["/bin/rm", "item"],
+            "another unconfigured agent/tool": ["other-agent", "rm", "item"],
+        }
+        self.assertTrue(set(representative_vectors).issubset(OUT_OF_COVERAGE_BYPASSES))
+        for bypass, argv in representative_vectors.items():
+            with self.subTest(bypass=bypass):
+                response = decide_request(self.request(argv))
+                self.assertEqual(response["decision"], "deny")
+                self.assertEqual(response["reason_code"], "unsupported_delete_invocation")
 
     def test_unwritable_ledger_fails_closed_without_child(self) -> None:
         initialize_layout(str(self.storage))
