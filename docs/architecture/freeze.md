@@ -620,10 +620,12 @@ product could make that stronger, and that is a non-goal.
 - Threshold precedence is `--older-than`/`--before` (exactly one, if supplied),
   then `SAFE_DELETE_RETENTION_DAYS`, then the hardcoded 30 days. An invalid
   environment value or flag is `usage_error`. The selected threshold or
-  absolute cutoff is visible in dry-run JSON output.
+  absolute cutoff, together with the source selected by that precedence chain,
+  is visible in dry-run JSON output.
 - `purge` defaults to dry-run and has no physical deletion side effect.
-  Execution requires explicit `--execute --yes`; a non-interactive cron/timer
-  invocation must include both.
+  Dry-run also appends no purge lifecycle event and does not change the ledger
+  or payload objects. Execution requires explicit `--execute --yes`; a
+  non-interactive cron/timer invocation must include both.
 - `--older-than` and `--before` together are a `usage_error`, as are
   `--dry-run` and `--execute` together. `--execute` without `--yes` is a
   confirmation error and performs no mutation.
@@ -633,7 +635,10 @@ product could make that stronger, and that is a non-goal.
   0 2 * * * /usr/bin/safe-delete purge --execute --yes --json
   ```
 
-  Installation and platform-specific service files are deferred to P5.
+  P5 owns documenting this exact invocation and the runner behavior it calls.
+  Installing or enabling cron/systemd (or another platform scheduler) is
+  operator-owned and is not performed by `safe-delete`; P5 does not add a
+  product installer or platform-specific service file.
 - Only `active` entries older than the selected threshold are ordinary
   candidates. A `purge_pending` entry whose last event is `purge_intent` and
   whose payload is still present is an additional crash-recovery candidate;
@@ -655,6 +660,25 @@ product could make that stronger, and that is a non-goal.
 - Clock skew, malformed timestamps, and unknown schema versions fail closed for
   eligibility. Purge never guesses an age.
 
+### P5 Contract Freeze status (Issue #7)
+
+**Status:** `freeze:pending` — this is a Phase 5 contract proposal only. No
+`FREEZE ACK` is recorded here, and no P5 `feat/` implementation branch is
+authorized until the disposer decides on [Issue #7](https://github.com/Dylan5237/safe-delete-cli/issues/7).
+
+This P5 refinement is subordinate to the already-frozen architecture: the
+`safe-delete purge` row in the [CLI contract](#cli-contract), lifecycle states
+and `purge_*` events in [Lifecycle state machine](#lifecycle-state-machine-and-crash-recovery),
+the [frozen machine-readable error vocabulary](#frozen-machine-readable-error-vocabulary),
+and the [Purge policy](#purge-policy) remain the governing contract. It adds
+only the replayable Issue #7 gate wording, dry-run visibility/no-mutation
+clarity, and scheduler-install ownership; it does not change P2, P3, or P4
+semantics.
+
+Exception #12 remains a P2-only accepted carve-out: P5 does not expand restore
+staging isolation claims, reopen same-UID staging mutation, or represent that
+residual publication-identity risk as fixed.
+
 ## Later-phase acceptance gates
 
 These are proposed, replayable gates. They are not verification results and do
@@ -665,8 +689,31 @@ not grant Phase Accept.
 | P2 — CLI + ledger + restore | In a clean test root, the P2-S0 surface initializes storage, reports `version`, lists/shows valid entries, and reports an injected orphan through `list --orphans`. `add` moves a file and directory without leaving the source, emits canonical UUID IDs, and appends valid P2 records. `restore` returns each to the original path, refuses an occupied destination without changing either side, and preserves the ledger history. Injected ledger/storage failure leaves no silent raw delete and emits a frozen error code. |
 | P3 — rich metadata | In a clean test root, `add --json` with all six rich inputs records the exact scalar values after the defined project-path normalization and round-trips an unknown nested `extensions` object. With each context source absent, the five scalar fields resolve to `null` (the known direct CLI caller may use the explicit `safe-delete-cli` tool value); no session or agent identity is fabricated. Flags override conflicting hook/env fixtures in the frozen order. Invalid type, NUL, duplicate-key, non-finite, or over-limit metadata is rejected before any move or append. A P3 reader lists, shows, and restores a P2 fixture whose rich fields are omitted; the fixture’s original ledger line remains byte-for-byte unchanged, and the restored payload and lifecycle history remain valid. |
 | P4 — hook enforcement | Supported PreToolUse and shim forms route to `safe-delete add`; the original raw command never executes. Cross-device sources, unsupported/ambiguous forms, unavailable CLI, unwritable root, and CLI failure deny. Non-deletion probes pass through, safe-delete calls pass once, and the bypass inventory above is exercised and reported as out of coverage. |
-| P5 — timed purge | A default dry-run selects only active entries at least 30 days old plus recoverable `purge_pending` entries with payloads. `--execute --yes` removes eligible payloads, appends auditable intent/completion events, returns failed removals to active, retries interrupted intents after a crash, leaves young/restored/unknown/audit-failing entries intact, and reports partial failure. The documented daily timer invokes the same explicit command. |
+| P5 — timed purge | Replay the four Issue #7 checks below. A default dry-run selects only active entries at least 30 days old plus recoverable `purge_pending` entries with payloads. `--execute --yes` removes eligible payloads, appends auditable intent/completion events, returns failed removals to active, retries interrupted intents after a crash, leaves young/restored/unknown/audit-failing entries intact, and reports partial failure. The documented daily timer invokes the same explicit command. |
 | P6 — full-path evidence | From a clean checkout, replay an agent deletion through hook → CLI → unified trash/ledger → list → restore and then a controlled aged-entry purge. Evidence records commit SHA, cwd, exact commands, tool/agent/session context, UTC timestamps, outputs, and artifact paths. The proof maps one-to-one to these gates and contains no product implementation change in an evidence PR. |
+
+The P5 row is replayed as four independent checks on a clean test root:
+
+1. **Retention boundary:** create a younger entry and an entry whose initial
+   `trash` timestamp is at least the selected threshold old; confirm the young
+   payload remains and the eligible aged payload is purged only under the
+   documented execution policy.
+2. **Dry-run/reporting:** run the default preview (and explicit `--dry-run`)
+   with `--json`; confirm the selected threshold/source or absolute cutoff and
+   candidates are reported, while payloads, ledger bytes, and purge events are
+   unchanged.
+3. **Partial failure and replay:** exercise independent candidates with one
+   removal failure and one successful removal; confirm `purge_failed` returns
+   the failed entry to `active` with `purge_remove_failed`, the command reports
+   `partial_failure`, and a later run safely retries the failed entry and a
+   crash-left `purge_pending` intent. A repeat after completion is idempotent
+   and exposes `already_purged`/terminal state without deleting again.
+4. **Restore and missing/corrupt behavior:** confirm restore and purge serialize
+   under the ledger lock, restored entries remain ineligible, an `active` entry
+   after `purge_failed` remains eligible for restore and later purge, and a
+   missing payload, orphan, malformed/unsupported ledger record, or other
+   audit-corrupt entry fails the whole purge before any new `purge_intent` and
+   never infers `purged`.
 
 P1 itself is complete only when the disposer confirms that one contract is
 reviewable, the proposed schema/CLI and later gates are unambiguous, and
