@@ -1,4 +1,4 @@
-"""Strict replay and object reconciliation for the P2 JSONL ledger."""
+"""Strict replay and object reconciliation for the versioned JSONL ledger."""
 
 from __future__ import annotations
 
@@ -12,6 +12,11 @@ from typing import Any
 
 from .errors import SafeDeleteError, error
 from .ledger import read_ledger_lines
+from .metadata import (
+    _reject_duplicate_keys,
+    _reject_non_finite,
+    metadata_from_record,
+)
 from .storage import Layout, ensure_safe_target, has_entry, kind_for, normalized_path
 
 
@@ -278,6 +283,14 @@ def _validate_record(record: Any, layout: Layout, line_number: int) -> dict[str,
             "error_code must be a string",
             entry_id=record["entry_id"],
         )
+    try:
+        metadata_from_record(record)
+    except SafeDeleteError as exc:
+        raise _invalid_record(
+            line_number,
+            exc.message,
+            entry_id=record.get("entry_id") if isinstance(record.get("entry_id"), str) else entry_hint,
+        ) from exc
     return record
 
 
@@ -314,8 +327,12 @@ def _read_records(layout: Layout, report: AuditReport) -> list[dict[str, Any]]:
             report.errors.append(_invalid_record(line_number, "blank ledger line"))
             continue
         try:
-            raw = json.loads(line)
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raw = json.loads(
+                line,
+                object_pairs_hook=_reject_duplicate_keys,
+                parse_constant=_reject_non_finite,
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             report.errors.append(
                 _invalid_record(line_number, f"invalid JSON ledger line: {exc}")
             )

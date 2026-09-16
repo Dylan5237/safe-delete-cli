@@ -1,4 +1,4 @@
-"""P2 minimum ledger records and durable append helpers."""
+"""Versioned ledger records and durable append helpers."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import SafeDeleteError, error
+from .metadata import RichMetadata, metadata_from_record
 from .storage import Layout, kind_for, open_directory_without_symlinks
 
 
@@ -87,8 +88,9 @@ def build_trash_record(
     original_path: str,
     trashed_path: str,
     kind: str,
+    metadata: RichMetadata | None = None,
 ) -> dict[str, object]:
-    return {
+    record: dict[str, object] = {
         "schema_version": 1,
         "event_id": str(uuid.uuid4()),
         "entry_id": entry_id,
@@ -99,6 +101,8 @@ def build_trash_record(
         "kind": kind,
         "timestamp": utc_timestamp(),
     }
+    record.update((metadata or RichMetadata()).record_fields())
+    return record
 
 
 def build_restore_record(
@@ -108,8 +112,9 @@ def build_restore_record(
     trashed_path: str,
     kind: str,
     restore_path: str,
+    metadata: RichMetadata | None = None,
 ) -> dict[str, object]:
-    return {
+    record: dict[str, object] = {
         "schema_version": 1,
         "event_id": str(uuid.uuid4()),
         "entry_id": entry_id,
@@ -121,6 +126,14 @@ def build_restore_record(
         "timestamp": utc_timestamp(),
         "restore_path": restore_path,
     }
+    record.update((metadata or RichMetadata()).record_fields())
+    return record
+
+
+def metadata_for_record(record: dict[str, object]) -> RichMetadata:
+    """Validate and copy rich metadata from an existing creation event."""
+
+    return metadata_from_record(record)
 
 
 def _ledger_failure(message: str, path: Path, exc: OSError | None = None) -> SafeDeleteError:
