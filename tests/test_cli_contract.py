@@ -448,6 +448,47 @@ class CliContractTests(unittest.TestCase):
         self.assertTrue(source.is_file())
         self.assertFalse(self.storage.exists())
 
+    def test_p3_existing_malformed_ledger_dry_run_fails_closed_without_mutation(self) -> None:
+        self.init_storage()
+        source = self.workspace / "malformed-dry-run.txt"
+        source.write_text("must stay", encoding="utf-8")
+        ledger = self.storage / "ledger.jsonl"
+        ledger.write_text("{malformed\n", encoding="utf-8")
+        ledger_before = ledger.read_bytes()
+        layout_before = sorted(
+            path.relative_to(self.storage).as_posix()
+            for path in self.storage.rglob("*")
+        )
+
+        code, payload = run_cli_at(
+            self.storage,
+            Path(self.temp_dir.name),
+            "add",
+            "--dry-run",
+            "--project",
+            str(self.workspace / "project"),
+            "--session-id",
+            "dry-session",
+            "--reason",
+            "preview",
+            "--agent",
+            "dry-agent",
+            "--tool",
+            "dry-tool",
+            "--",
+            str(source),
+        )
+        self.assertEqual(code, 4, payload)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["errors"][0]["code"], "malformed_ledger")
+        self.assertEqual(payload["results"][0]["error"]["code"], "malformed_ledger")
+        self.assertTrue(source.is_file())
+        self.assertEqual(ledger.read_bytes(), ledger_before)
+        self.assertEqual(
+            sorted(path.relative_to(self.storage).as_posix() for path in self.storage.rglob("*")),
+            layout_before,
+        )
+
     def test_p3_invalid_metadata_is_rejected_before_move_or_append(self) -> None:
         cases = [
             ("non-object", "--extensions", "[]"),

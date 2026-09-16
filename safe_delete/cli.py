@@ -527,6 +527,17 @@ def _handle_add(
     if args.dry_run:
         try:
             layout = layout_for(args.root)
+            if os.path.lexists(layout.ledger):
+                layout = require_layout(str(layout.root))
+                with ledger_lock(layout, exclusive=False):
+                    audit = audit_layout(layout)
+                if audit.errors:
+                    errors = list(audit.errors)
+                    representative = errors[0]
+                    return [
+                        _failed_input_result(raw_path, representative)
+                        for raw_path in args.paths
+                    ], errors
         except SafeDeleteError as exc:
             return [
                 _failed_input_result(raw_path, _with_path(exc, raw_path))
