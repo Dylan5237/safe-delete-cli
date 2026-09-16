@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .audit import LedgerEntry
 from .errors import SafeDeleteError, error
-from .ledger import append_event, build_restore_record
+from .ledger import append_event, build_restore_record, metadata_for_record
 from .move import atomic_move, rename_without_replace
 from .storage import (
     Layout,
@@ -699,6 +699,25 @@ def restore_entry(
                 trashed_path=str(payload),
             )
 
+        try:
+            # Freeze the creation context before any destructive publication.
+            # Restore must never re-resolve metadata after moving the payload.
+            metadata = metadata_for_record(entry.creation)
+        except SafeDeleteError:
+            raise
+        except RecursionError as exc:
+            raise error(
+                "usage_error",
+                "rich metadata is too deeply nested",
+                entry_id=entry.entry_id,
+            ) from exc
+        except Exception as exc:
+            raise error(
+                "storage_failure",
+                "cannot validate restore metadata",
+                entry_id=entry.entry_id,
+            ) from exc
+
         destination = entry.original_path if restore_path is None else restore_path
         destination_path = Path(destination)
         ensure_safe_target(layout, destination)
@@ -760,6 +779,34 @@ def restore_entry(
                 trashed_path=str(payload),
             )
             raise _cleanup_and_attach(primary, created_parents, staging_fd)
+
+        try:
+            # Build the exact event before moving. If this fails, the staged
+            # parents are still unpublished and can be rolled back normally.
+            record = build_restore_record(
+                entry_id=entry.entry_id,
+                original_path=entry.original_path,
+                trashed_path=str(payload),
+                kind=entry.kind,
+                restore_path=destination,
+                metadata=metadata,
+            )
+        except SafeDeleteError as exc:
+            raise _cleanup_and_attach(exc, created_parents, staging_fd)
+        except RecursionError as exc:
+            primary = error(
+                "usage_error",
+                "rich metadata is too deeply nested",
+                entry_id=entry.entry_id,
+            )
+            raise _cleanup_and_attach(primary, created_parents, staging_fd) from exc
+        except Exception as exc:
+            primary = error(
+                "storage_failure",
+                "cannot build restore ledger event",
+                entry_id=entry.entry_id,
+            )
+            raise _cleanup_and_attach(primary, created_parents, staging_fd) from exc
 
         try:
             atomic_move(
@@ -853,13 +900,6 @@ def restore_entry(
                 created_parent.published = True
             top.staged_name = None
 
-        record = build_restore_record(
-            entry_id=entry.entry_id,
-            original_path=entry.original_path,
-            trashed_path=str(payload),
-            kind=entry.kind,
-            restore_path=destination,
-        )
         try:
             append_event(layout, record)
         except SafeDeleteError as append_error:
@@ -875,7 +915,7 @@ def restore_entry(
                 staging_fd=staging_fd,
             )
 
-        return {
+        result = {
             "entry_id": entry.entry_id,
             "state": "restored",
             "original_path": entry.original_path,
@@ -883,6 +923,8 @@ def restore_entry(
             "trashed_path": str(payload),
             "kind": entry.kind,
         }
+        result.update(metadata.projection_fields())
+        return result
     finally:
         if destination_parent_fd is not None:
             os.close(destination_parent_fd)
