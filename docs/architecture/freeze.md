@@ -473,6 +473,10 @@ same-filesystem rollback under the same lock; a failed rollback returns
 `rollback_failed` with both paths and leaves the discrepancy for `list` audit
 reporting rather than guessing a completed restore.
 
+Phase 2's accepted threat-model carve-out for same-UID mutation of private
+staging entries is recorded in [architecture exceptions](exceptions.md). Its
+residual publication-identity risk is explicit and is not represented as fixed.
+
 ## Hook contract
 
 P4 will provide host-specific packages, but every adapter must normalize to the
