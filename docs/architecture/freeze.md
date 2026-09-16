@@ -392,7 +392,7 @@ authorized before that comment.
 
 ## P2–P6 atomic commit plan and alignment
 
-The existing [`docs/project/commit-plan.md`](../project/commit-plan.md) on
+The existing [`docs/project/commit-plan.md`](https://github.com/Dylan5237/safe-delete-cli/blob/main/docs/project/commit-plan.md) on
 `main` remains the project’s proposed atomic plan and is subordinate to this
 Phase contract and disposer decisions. The list below **preserves every
 P2–P6 commit slice already named there** and refines it by mapping each slice
