@@ -687,8 +687,9 @@ codes remain the P2/P3 CLI's responsibility.
 - A configured `PreToolUse` adapter intercepts supported shell/tool requests
   whose executable is `rm`, `unlink`, or `rmdir` (including supported
   `-r`/`-R`/`-f` forms and `--` path operands).
-- An `rm` shim on `PATH` applies the same recognized-argv policy and invokes
-  `safe-delete add` with hook metadata.
+- A PATH shim dispatcher is exposed under package-owned `rm`, `unlink`, and
+  `rmdir` entry points (with `rm` as the primary shim). It applies the same
+  recognized-argv policy and invokes `safe-delete add` with hook metadata.
 - `safe-delete add` itself is allowed and is never routed recursively.
 - Unsupported flags, ambiguous tokenization, shell expansion that the adapter
   cannot prove safe, missing metadata required by the host, unavailable CLI,
@@ -719,7 +720,7 @@ that is actually present:
 | `agent` | `--agent VALUE` when present and valid |
 | `reason` | `--reason VALUE` when present and valid; never inferred from argv/path |
 | `extensions` | `--extensions COMPACT_JSON_OBJECT` when present and valid |
-| adapter identity | `--tool pretooluse:TOOL` or `--tool rm-shim` |
+| adapter identity | `--tool pretooluse:TOOL` or `--tool path-shim:COMMAND` (`COMMAND` is `rm`, `unlink`, or `rmdir`) |
 
 The adapter identity in `--tool` is not a fabricated agent identity. If the
 host does not provide `session_id` or `agent`, those flags are omitted and P3
@@ -740,7 +741,7 @@ small management command; it will not silently install an OS-wide policy:
 | Surface | P4-owned package state | Host-owned registration/configuration |
 | --- | --- | --- |
 | PreToolUse adapter | Versioned adapter payload under `$XDG_DATA_HOME/safe-delete/hooks/` (fallback `$HOME/.local/share/safe-delete/hooks/`) and a registry under `$XDG_CONFIG_HOME/safe-delete/hooks.json` (fallback `$HOME/.config/safe-delete/hooks.json`). | The host's documented PreToolUse registration. Claude-style defaults are user `~/.claude/settings.json` or project `<project>/.claude/settings.json`; Cursor-style defaults are project `<project>/.cursor/hooks.json` or an explicit `--config PATH` when the host supplies another supported location. |
-| PATH `rm` shim | A package-owned shim named `rm` in `$XDG_DATA_HOME/safe-delete/bin/` (same fallback rule); it must never overwrite or replace `/bin/rm` or another unowned executable. | The agent process's PATH/environment activation. The installer may emit or update an explicitly selected host environment entry, but does not edit arbitrary shell startup files. The shim directory must precede the system `rm` for enforcement. |
+| PATH `rm` shim | A package-owned dispatcher exposed as `rm`, `unlink`, and `rmdir` in `$XDG_DATA_HOME/safe-delete/bin/` (same fallback rule); it must never overwrite or replace `/bin/rm`, `/bin/unlink`, `/bin/rmdir`, or another unowned executable. | The agent process's PATH/environment activation. The installer may emit or update an explicitly selected host environment entry, but does not edit arbitrary shell startup files. The shim directory must precede the system deletion binaries for enforcement. |
 
 The storage root (`SAFE_DELETE_ROOT` or the P2 default) and its ledger are
 runtime data, not package state. Installation must not move, rewrite, or delete
@@ -760,9 +761,10 @@ The management surface has these contract-level behaviors:
   the registry. Repeating the same install is a no-op. It does not enable a
   different host or change the trash root implicitly.
 - `status` is read-only. It reports package version/path, host registration
-  path, enabled/disabled state, resolved `safe-delete`, shim precedence, and
-  root/ledger usability. Missing, unreadable, or ambiguous state is reported
-  as not enforced; status never upgrades a warning into an enforcement claim.
+  path, enabled/disabled state, resolved `safe-delete`, the `rm`/`unlink`/
+  `rmdir` shim precedence, and root/ledger usability. Missing, unreadable, or
+  ambiguous state is reported as not enforced; status never upgrades a warning
+  into an enforcement claim.
 - `disable` removes or disables only this package's registration/activation,
   leaves the package files and all trash/ledger data intact, and is idempotent.
   While disabled, status must say that raw deletion is outside the configured
@@ -780,9 +782,9 @@ configuration is being added by this proposal.
 
 This is an honest client-side boundary. It does not intercept deletion through
 Python/Go/Node filesystem APIs, `find -delete`, `git clean`, `busybox rm`, an
-absolute `/bin/rm`, another unconfigured agent/tool, a container or namespace
-without the hook, a privileged process, or a human process. A user can also
-remove or bypass a shim. P4 must test and document these limits; it must not
+absolute `/bin/rm`, `/bin/unlink`, or `/bin/rmdir`, another unconfigured
+agent/tool, a container or namespace without the hook, a privileged process, or
+a human process. A user can also remove or bypass a shim. P4 must test and document these limits; it must not
 claim universal enforcement. Only an OS policy/kernel control outside this
 product could make that stronger, and that is a non-goal.
 
