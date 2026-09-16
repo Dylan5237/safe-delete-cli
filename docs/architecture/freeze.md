@@ -1,9 +1,11 @@
-# Phase 1 — Safe-delete architecture contract (proposal)
+# CONTRACT FREEZE PROPOSAL — Phase 1: Safe-delete architecture contract
 
 **Status:** Contract Freeze proposal only; pending review and `FREEZE ACK` by
 `@Dylan5237` on [Issue #3](https://github.com/Dylan5237/safe-delete-cli/issues/3).
 
 **Contract ID:** `safe-delete/p1` · proposed version `1`
+
+**Review artifact:** [docs PR #10](https://github.com/Dylan5237/safe-delete-cli/pull/10)
 
 This document is a reviewable mirror of the Contract Freeze proposal posted on
 Issue #3. It defines behavior and interfaces for the later implementation and
