@@ -554,7 +554,16 @@ residual publication-identity risk is explicit and is not represented as fixed.
 ## Hook contract
 
 P4 will provide host-specific packages, but every adapter must normalize to the
-following adapter-neutral request/decision contract:
+following adapter-neutral request/decision contract. This section freezes the
+boundary behavior only; it does not implement an adapter, change the P2/P3 CLI,
+or make a host configuration file part of the trash/ledger namespace.
+
+### Adapter-neutral request and decision wire contract
+
+The adapter receives one tokenized invocation at a time. A shell source string
+is not a substitute for `argv`: a host that cannot provide the exact token
+boundary must deny the deletion request. The request is UTF-8 JSON and has
+these fields:
 
 ```json
 {
@@ -565,21 +574,113 @@ following adapter-neutral request/decision contract:
   "cwd": "/workspace/app",
   "project": "/workspace/app",
   "session_id": "sess-123",
-  "agent": "codex/luna"
+  "agent": "codex/luna",
+  "reason": "remove generated build output",
+  "extensions": {"example.org/trace": {"source": "ci"}}
 }
 ```
 
-The hook returns one of:
+`protocol_version`, `request_id`, `tool`, `argv`, and `cwd` are required. The
+version must be exactly `1`; `request_id` is an opaque, non-empty per-request
+correlation value and is echoed unchanged; `tool` identifies the host tool
+shape (for example `shell`), not the human or agent identity; `argv` is the
+exact argument vector including `argv[0]`; and `cwd` is the absolute invocation
+directory used to resolve relative operands. A missing, malformed, or
+unusable required field is an unsupported/ambiguous invocation and is denied.
+
+`project`, `session_id`, `agent`, `reason`, and `extensions` are optional host
+context. They are absent when the host does not know them; the adapter must not
+invent them from a username, hostname, process ID, request ID, path basename,
+or shell text. `extensions`, when present, is a JSON object and is passed to
+the P3 validator unchanged in meaning. Host-specific required-context policy
+may make one of these fields mandatory for that host; if it is unavailable,
+that adapter denies rather than weakening the host policy.
+
+The normalized response is also UTF-8 JSON and has one of three decisions:
 
 ```json
-{"request_id":"req-123","decision":"route","reason_code":"raw_delete","safe_delete_argv":["safe-delete","add","--project","/workspace/app","--session-id","sess-123","--agent","codex/luna","--tool","pretooluse:shell","--","/workspace/app/build"]}
+{"protocol_version":1,"request_id":"req-123","decision":"route","reason_code":"raw_delete","safe_delete_argv":["safe-delete","add","--project","/workspace/app","--session-id","sess-123","--agent","codex/luna","--reason","remove generated build output","--extensions","{\"example.org/trace\":{\"source\":\"ci\"}}","--tool","pretooluse:shell","--","/workspace/app/build"]}
 ```
 
 or:
 
 ```json
-{"request_id":"req-123","decision":"deny","reason_code":"unsupported_delete_invocation","message":"Use safe-delete add with explicit paths."}
+{"protocol_version":1,"request_id":"req-123","decision":"deny","reason_code":"unsupported_delete_invocation","message":"Use safe-delete add with explicit paths."}
 ```
+
+or:
+
+```json
+{"protocol_version":1,"request_id":"req-123","decision":"passthrough","reason_code":"non_delete_probe"}
+```
+
+The decision meanings are fixed:
+
+- `route` requires `safe_delete_argv`. The adapter executes that vector as the
+  replacement operation in the original `cwd`; it never executes the raw
+  deletion vector. A successful route means the `safe-delete add` child exits
+  successfully. A nonzero child result becomes `deny` at the host boundary
+  (or a failed shim exit), with a propagated CLI `code` when one is available.
+- `deny` forbids execution of the original vector. A PreToolUse host rejects
+  the tool call, and a PATH shim returns a nonzero exit without invoking the
+  system deletion binary.
+- `passthrough` executes the original vector unchanged only for a recognized
+  non-deletion probe or an invocation that is already `safe-delete add`.
+  `passthrough` is never a failure fallback for a deletion request.
+
+The hook reason-code set for protocol version 1 is:
+
+| `reason_code` | Decision | Meaning |
+| --- | --- | --- |
+| `raw_delete` | `route` | A supported raw deletion vector was recognized and rewritten. |
+| `non_delete_probe` | `passthrough` | `--help`, `--version`, or a no-operand probe was recognized. |
+| `safe_delete_add` | `passthrough` | The caller already invoked `safe-delete add`; no recursive routing occurs. |
+| `unsupported_delete_invocation` | `deny` | An unsupported flag, operand, wrapper, tokenization, or required context made safe routing unprovable. |
+| `cli_unavailable` | `deny` | The configured `safe-delete` executable could not be resolved or started. |
+| `storage_unavailable` | `deny` | The configured root, trash area, lock, or ledger could not be used. |
+| `safe_delete_error` | `deny` | The CLI failed without a more specific machine-readable code. |
+| a frozen CLI error code | `deny` | The CLI returned a specific code such as `source_not_found`, `cross_device`, `ledger_failure`, or `storage_failure`; it is propagated unchanged. |
+
+The response always echoes `request_id` and `protocol_version`. `message` is
+operator-facing and not a stable parsing interface. A `route` response is a
+rewrite authorization, not a claim that the move has succeeded; the adapter
+must wait for the child result before reporting success.
+
+### Recognition and argv rewriting
+
+The supported recognition boundary is intentionally small and deterministic:
+
+- A normalized executable of `rm` accepts zero or more short option tokens
+  whose letters are only `r`, `R`, and `f` (including grouped forms such as
+  `-rf`), followed by one or more operands. The first `--` ends options and
+  makes every following token an operand, including an option-looking path.
+  The recognized `r`/`R`/`f` options express deletion intent and are not copied
+  into the replacement command; recursion and force behavior are enforced by
+  the frozen `safe-delete add` semantics, not by calling raw `rm`.
+- A normalized `unlink` or `rmdir` accepts one or more operands, optionally
+  after `--`, and accepts no other options. `rmdir -p`, `unlink -f`, and any
+  other option-bearing form are denied as unsupported rather than guessed.
+- For all three executables, a no-operand probe and the exact non-deletion
+  probes `--help` and `--version` pass through unchanged. A probe combined
+  with deletion operands is not a probe and is denied unless it matches the
+  supported form above.
+- Options after an operand without `--`, unknown options, an option-looking
+  operand without `--`, empty/invalid tokens, and an argv that cannot be
+  resolved relative to `cwd` are unsupported/ambiguous and are denied.
+
+For a routed request, the adapter resolves relative operands against `cwd` and
+constructs exactly one child invocation:
+
+```text
+safe-delete add [P3 metadata flags supplied by the request] -- ABSOLUTE_OPERAND...
+```
+
+The original deletion flags, shell syntax, glob text, and wrapper tokens are
+never forwarded. The `--` delimiter is always present before operands. One
+raw request produces at most one `safe-delete add` invocation; a CLI failure
+does not trigger a retry or a raw-deletion fallback. Path kind, trash-root
+exclusion, same-filesystem checks, atomic move, ledger durability, and error
+codes remain the P2/P3 CLI's responsibility.
 
 ### What is intercepted
 
@@ -599,6 +700,82 @@ or:
   functions, are outside the guaranteed recognition boundary unless the host
   adapter explicitly normalizes them.
 
+The executable must be the normalized command at the adapter boundary. A
+direct `/bin/rm`, a shell function, or a wrapper that the host leaves opaque is
+not silently treated as `rm`; it is outside the guarantee unless the host
+adapter explicitly supplies a normalized argv. This keeps the recognition
+boundary honest and avoids claiming that a PATH shim controls an invocation
+that never resolved through that PATH.
+
+### P3 metadata propagation
+
+The hook runs the replacement in the request's `cwd` and maps only context
+that is actually present:
+
+| Request context | `safe-delete add` flag |
+| --- | --- |
+| `project` | `--project VALUE` when present and valid |
+| `session_id` | `--session-id VALUE` when present and valid |
+| `agent` | `--agent VALUE` when present and valid |
+| `reason` | `--reason VALUE` when present and valid; never inferred from argv/path |
+| `extensions` | `--extensions COMPACT_JSON_OBJECT` when present and valid |
+| adapter identity | `--tool pretooluse:TOOL` or `--tool rm-shim` |
+
+The adapter identity in `--tool` is not a fabricated agent identity. If the
+host does not provide `session_id` or `agent`, those flags are omitted and P3
+records the honest `null` result. If `project` is absent, the normal P3
+environment/detection/null chain remains available; the adapter does not guess
+a project from the operand. Direct `safe-delete add` calls continue to use the
+P3 precedence `explicit CLI flag → hook context → supported environment →
+supported detection → null`; an explicit CLI value remains higher precedence
+than hook context. Invalid supplied values are rejected before any move or
+ledger append, as already frozen by P3. The adapter must not add request IDs,
+hostnames, usernames, timestamps, or inferred reasons to `extensions`.
+
+### Installation and package boundaries
+
+P4 implementation will ship two logical, user-scoped package surfaces and a
+small management command; it will not silently install an OS-wide policy:
+
+| Surface | P4-owned package state | Host-owned registration/configuration |
+| --- | --- | --- |
+| PreToolUse adapter | Versioned adapter payload under `$XDG_DATA_HOME/safe-delete/hooks/` (fallback `$HOME/.local/share/safe-delete/hooks/`) and a registry under `$XDG_CONFIG_HOME/safe-delete/hooks.json` (fallback `$HOME/.config/safe-delete/hooks.json`). | The host's documented PreToolUse registration. Claude-style defaults are user `~/.claude/settings.json` or project `<project>/.claude/settings.json`; Cursor-style defaults are project `<project>/.cursor/hooks.json` or an explicit `--config PATH` when the host supplies another supported location. |
+| PATH `rm` shim | A package-owned shim named `rm` in `$XDG_DATA_HOME/safe-delete/bin/` (same fallback rule); it must never overwrite or replace `/bin/rm` or another unowned executable. | The agent process's PATH/environment activation. The installer may emit or update an explicitly selected host environment entry, but does not edit arbitrary shell startup files. The shim directory must precede the system `rm` for enforcement. |
+
+The storage root (`SAFE_DELETE_ROOT` or the P2 default) and its ledger are
+runtime data, not package state. Installation must not move, rewrite, or delete
+trash objects or ledger lines. Host configuration edits are atomic,
+idempotent, limited to the package's own registration, and preserve unrelated
+keys; an unparseable or unwritable target fails closed without a partial
+registration. An explicit `--config PATH` is required whenever the host's
+configuration location is not one of the supported defaults. Unsupported hosts
+are reported as unsupported; the installer does not drop an unregistered file
+and claim enforcement.
+
+The management surface has these contract-level behaviors:
+
+- `install` verifies that the CLI and adapter package are runnable, installs or
+  reuses package-owned files, registers the selected PreToolUse host or emits
+  the selected PATH activation, and records the exact configuration/path in
+  the registry. Repeating the same install is a no-op. It does not enable a
+  different host or change the trash root implicitly.
+- `status` is read-only. It reports package version/path, host registration
+  path, enabled/disabled state, resolved `safe-delete`, shim precedence, and
+  root/ledger usability. Missing, unreadable, or ambiguous state is reported
+  as not enforced; status never upgrades a warning into an enforcement claim.
+- `disable` removes or disables only this package's registration/activation,
+  leaves the package files and all trash/ledger data intact, and is idempotent.
+  While disabled, status must say that raw deletion is outside the configured
+  boundary; no fallback behavior is introduced.
+- `uninstall` first disables the selected integration, removes only
+  package-owned registrations/files whose ownership is provable, and leaves
+  the storage root, trash, and ledger untouched. If ownership or configuration
+  safety cannot be established, it fails closed and leaves the target in place.
+
+These are package and host-integration rules, not implementation instructions
+for this Freeze session. No adapter package, shim, install script, or host
+configuration is being added by this proposal.
+
 ### Known bypass limits
 
 This is an honest client-side boundary. It does not intercept deletion through
@@ -608,6 +785,26 @@ without the hook, a privileged process, or a human process. A user can also
 remove or bypass a shim. P4 must test and document these limits; it must not
 claim universal enforcement. Only an OS policy/kernel control outside this
 product could make that stronger, and that is a non-goal.
+
+The bypass inventory is evidence about coverage, not a failure of the hook
+contract: the acceptance replay exercises representative bypasses and records
+them as explicitly out-of-coverage. A disabled/uninstalled integration, a PATH
+reordering, or a host that never invokes the adapter is likewise outside the
+client-side guarantee.
+
+### P4 Contract Freeze status (Issue #6)
+
+**Status:** `freeze:pending` — this is a Phase 4 Contract Freeze proposal only.
+It does not contain adapter, shim, installation, or test implementation and it
+does not authorize a `feat/` or `fix/` branch. The P4 docs can be reviewed while
+the P3 implementation remains in flight on `feat/5-rich-metadata`; P4 Freeze
+does not depend on P3 landing for documentation, but P4 implementation awaits
+the P3 implementation/acceptance path as the PM Next Action so the frozen
+metadata flags and precedence are available.
+
+Accepted Architecture Exception #12 remains P2-only. P4 does not reopen,
+expand, or claim to fix same-UID private restore-staging isolation; hook
+enforcement and restore staging are separate boundaries.
 
 ## Purge policy
 
@@ -664,7 +861,7 @@ not grant Phase Accept.
 | --- | --- |
 | P2 — CLI + ledger + restore | In a clean test root, the P2-S0 surface initializes storage, reports `version`, lists/shows valid entries, and reports an injected orphan through `list --orphans`. `add` moves a file and directory without leaving the source, emits canonical UUID IDs, and appends valid P2 records. `restore` returns each to the original path, refuses an occupied destination without changing either side, and preserves the ledger history. Injected ledger/storage failure leaves no silent raw delete and emits a frozen error code. |
 | P3 — rich metadata | In a clean test root, `add --json` with all six rich inputs records the exact scalar values after the defined project-path normalization and round-trips an unknown nested `extensions` object. With each context source absent, the five scalar fields resolve to `null` (the known direct CLI caller may use the explicit `safe-delete-cli` tool value); no session or agent identity is fabricated. Flags override conflicting hook/env fixtures in the frozen order. Invalid type, NUL, duplicate-key, non-finite, or over-limit metadata is rejected before any move or append. A P3 reader lists, shows, and restores a P2 fixture whose rich fields are omitted; the fixture’s original ledger line remains byte-for-byte unchanged, and the restored payload and lifecycle history remain valid. |
-| P4 — hook enforcement | Supported PreToolUse and shim forms route to `safe-delete add`; the original raw command never executes. Cross-device sources, unsupported/ambiguous forms, unavailable CLI, unwritable root, and CLI failure deny. Non-deletion probes pass through, safe-delete calls pass once, and the bypass inventory above is exercised and reported as out of coverage. |
+| P4 — hook enforcement | In an isolated test root, supported PreToolUse and PATH-shim vectors for `rm`, `unlink`, and `rmdir` (including the frozen `-r`/`-R`/`-f` and `--` forms) produce one exact `safe-delete add` child invocation; the original raw command never executes and one successful input produces one ledger entry. Cross-device sources, unsupported/ambiguous forms, malformed or missing required host context, unavailable CLI, unregistered/disabled integration, unwritable root/ledger, and nonzero CLI results deny or return a failed shim exit with no raw fallback. `rm --help`, `rm --version`, no-operand probes, and direct `safe-delete add` pass through exactly once. Install/status/disable/uninstall are idempotent and report the selected host/configuration boundary. The bypass inventory above is replayed and reported explicitly as out of coverage. |
 | P5 — timed purge | A default dry-run selects only active entries at least 30 days old plus recoverable `purge_pending` entries with payloads. `--execute --yes` removes eligible payloads, appends auditable intent/completion events, returns failed removals to active, retries interrupted intents after a crash, leaves young/restored/unknown/audit-failing entries intact, and reports partial failure. The documented daily timer invokes the same explicit command. |
 | P6 — full-path evidence | From a clean checkout, replay an agent deletion through hook → CLI → unified trash/ledger → list → restore and then a controlled aged-entry purge. Evidence records commit SHA, cwd, exact commands, tool/agent/session context, UTC timestamps, outputs, and artifact paths. The proof maps one-to-one to these gates and contains no product implementation change in an evidence PR. |
 
@@ -720,12 +917,16 @@ after `FREEZE ACK`.
 
 ### P4 — Hook enforcement (Issue #6)
 
-1. `feat: add safe-delete hook boundary` — § adapter-neutral Hook contract and
-   supported invocation set.
-2. `feat: reject raw deletion attempts` — § fail-closed decisions and bypass
+1. `feat: add safe-delete hook boundary` — § adapter-neutral Hook contract,
+   exact supported invocation set, P3 flag propagation, and package/host
+   installation boundary.
+2. `feat: reject raw deletion attempts` — § route/deny/passthrough decisions,
+   fail-closed execution, deterministic operator errors, and honest bypass
    limits.
-3. `test: cover hook enforcement paths` — P4 acceptance gate, including
-   unsupported and unavailable-CLI cases.
+3. `test: cover hook enforcement paths` — the P4 acceptance gate, including
+   supported `rm`/`unlink`/`rmdir` forms, safe-delete-once behavior, probes,
+   unsupported forms, unavailable CLI/storage, install lifecycle, and the
+   out-of-coverage bypass inventory.
 
 ### P5 — Timed purge (Issue #7)
 
