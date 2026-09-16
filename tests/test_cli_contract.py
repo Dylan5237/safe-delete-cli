@@ -686,32 +686,36 @@ class CliContractTests(unittest.TestCase):
         payload = Path(add_payload["results"][0]["trashed_path"])
         target = self.workspace / "raced" / "nested" / "target.txt"
         external = self.workspace / "external"
-        parked = self.workspace / "parked"
         external.mkdir()
-        parked.mkdir()
 
         import safe_delete.cli as cli
         import safe_delete.restore as restore
 
-        real_mkdir = restore.os.mkdir
+        planted = False
 
-        def mkdir_then_replace(name: str, mode: int = 0o777, *, dir_fd: int | None = None) -> None:
-            real_mkdir(name, mode, dir_fd=dir_fd)
-            if name == "raced":
-                os.rename(self.workspace / "raced", parked / "raced")
+        def plant_symlink(parent_fd: int, name: str) -> None:
+            nonlocal planted
+            # Adversary occupies the first-missing component name with a
+            # symlink in the exact staging-to-publish window.
+            if name == "raced" and not planted:
                 (self.workspace / "raced").symlink_to(external, target_is_directory=True)
+                planted = True
 
         args = Namespace(
             root=str(self.storage), entry_id=entry_id, restore_to=str(target),
             create_parents=True,
         )
-        with patch.object(restore.os, "mkdir", side_effect=mkdir_then_replace):
+        with patch.object(restore, "_before_publish_hook", side_effect=plant_symlink):
             results, errors = cli._handle_restore(args)
+        self.assertTrue(planted)
         self.assertEqual(results, [])
-        self.assertEqual(errors[0].code, "destination_parent_missing")
+        self.assertEqual(errors[0].code, "storage_failure")
         self.assertTrue(payload.is_file())
         self.assertEqual(len((self.storage / "ledger.jsonl").read_text().splitlines()), 1)
+        raced = self.workspace / "raced"
+        self.assertTrue(raced.is_symlink())
         self.assertFalse((external / "nested").exists())
+        self.assertFalse(target.exists())
 
     def test_restore_parent_creation_rejects_real_directory_replacement(self) -> None:
         self.init_storage()
@@ -722,45 +726,39 @@ class CliContractTests(unittest.TestCase):
         entry_id = add_payload["results"][0]["entry_id"]
         payload = Path(add_payload["results"][0]["trashed_path"])
         target = self.workspace / "real-raced" / "nested" / "target.txt"
-        parked = self.workspace / "parked-real-race"
-        parked.mkdir()
 
         import safe_delete.cli as cli
         import safe_delete.restore as restore
 
-        real_open = restore.os.open
         replaced = False
 
-        def open_after_replace(
-            name: str,
-            flags: int,
-            *open_args: object,
-            dir_fd: int | None = None,
-            **open_kwargs: object,
-        ) -> int:
+        def plant_real_directory(parent_fd: int, name: str) -> None:
             nonlocal replaced
-            current = self.workspace / "real-raced"
-            if name == "real-raced" and not replaced and current.is_dir():
-                os.rename(current, parked / "real-raced")
-                current.mkdir()
+            # Adversary substitutes a real directory at the first-missing
+            # component name after the new parent was created but before its
+            # identity can be bound at the destination pathname.
+            if name == "real-raced" and not replaced:
+                (self.workspace / "real-raced").mkdir()
                 replaced = True
-            return real_open(name, flags, *open_args, dir_fd=dir_fd, **open_kwargs)
 
         args = Namespace(
             root=str(self.storage), entry_id=entry_id, restore_to=str(target),
             create_parents=True,
         )
-        with patch.object(restore.os, "open", side_effect=open_after_replace):
+        with patch.object(restore, "_before_publish_hook", side_effect=plant_real_directory):
             results, errors = cli._handle_restore(args)
         self.assertTrue(replaced)
         self.assertEqual(results, [])
         self.assertEqual(errors[0].code, "storage_failure")
+        self.assertIn("refusing to adopt", errors[0].message)
         self.assertTrue(payload.is_file())
         self.assertEqual(len((self.storage / "ledger.jsonl").read_text().splitlines()), 1)
         self.assertTrue((self.workspace / "real-raced").is_dir())
-        self.assertTrue((parked / "real-raced").is_dir())
-        self.assertFalse(target.exists())
         self.assertFalse((self.workspace / "real-raced" / "nested").exists())
+        self.assertFalse(target.exists())
+        staging = self.storage / "trash" / "staging"
+        if staging.exists():
+            self.assertEqual(list(staging.iterdir()), [])
 
     def test_restore_append_failure_human_output_includes_restore_and_trash_paths(self) -> None:
         self.init_storage()
@@ -834,6 +832,96 @@ class CliContractTests(unittest.TestCase):
         self.assertFalse((self.workspace / "rollback-raced" / "nested").exists())
         self.assertFalse((self.workspace / "rollback-raced" / "nested" / "target.txt").exists())
         self.assertFalse((parked / "rollback-raced" / "nested" / "target.txt").exists())
+
+    def test_restore_cleanup_preserves_replacement_at_reclaim_window(self) -> None:
+        self.init_storage()
+        source = self.workspace / "cleanup-race-source.txt"
+        source.write_text("content", encoding="utf-8")
+        code, add_payload = run_cli(self.storage, "add", "--", str(source))
+        self.assertEqual(code, 0, add_payload)
+        entry_id = add_payload["results"][0]["entry_id"]
+        payload = Path(add_payload["results"][0]["trashed_path"])
+        target = self.workspace / "cleanup-raced" / "nested" / "target.txt"
+        parked = self.workspace / "parked-cleanup-race"
+        parked.mkdir()
+
+        import safe_delete.cli as cli
+        import safe_delete.restore as restore
+        from safe_delete.errors import SafeDeleteError
+
+        injected = SafeDeleteError("ledger_failure", "restore append blocked")
+        replaced = False
+
+        def replace_at_reclaim(parent_fd: int, name: str) -> None:
+            nonlocal replaced
+            # Adversary swaps the created parent for an unrelated replacement
+            # after cleanup resolved its identity, immediately before any
+            # removal. The marker file proves the replacement is never
+            # deleted, not even partially.
+            current = self.workspace / "cleanup-raced"
+            if name == "cleanup-raced" and not replaced:
+                os.rename(current, parked / "cleanup-raced")
+                current.mkdir()
+                (current / "attacker-marker.txt").write_text("keep me", encoding="utf-8")
+                replaced = True
+
+        args = Namespace(
+            root=str(self.storage), entry_id=entry_id, restore_to=str(target),
+            create_parents=True,
+        )
+        with patch.object(restore, "append_event", side_effect=injected):
+            with patch.object(
+                restore,
+                "_before_cleanup_reclaim_hook",
+                side_effect=replace_at_reclaim,
+            ):
+                results, errors = cli._handle_restore(args)
+        self.assertTrue(replaced)
+        self.assertEqual(results, [])
+        self.assertEqual(errors[0].code, "rollback_failed")
+        self.assertEqual(errors[0].details["cleanup_error"], "storage_failure")
+        self.assertTrue(errors[0].details["cleanup_preserved"])
+        self.assertTrue(payload.is_file())
+        self.assertEqual(len((self.storage / "ledger.jsonl").read_text().splitlines()), 1)
+        self.assertEqual(
+            (self.workspace / "cleanup-raced" / "attacker-marker.txt").read_text(
+                encoding="utf-8"
+            ),
+            "keep me",
+        )
+        self.assertTrue((parked / "cleanup-raced").is_dir())
+        self.assertFalse((self.workspace / "cleanup-raced" / "nested").exists())
+        self.assertFalse(target.exists())
+        staging = self.storage / "trash" / "staging"
+        if staging.exists():
+            self.assertEqual(list(staging.iterdir()), [])
+
+    def test_restore_create_parents_leaves_no_staging_litter(self) -> None:
+        self.init_storage()
+        source = self.workspace / "hygiene-source.txt"
+        source.write_text("content", encoding="utf-8")
+        code, add_payload = run_cli(self.storage, "add", "--", str(source))
+        self.assertEqual(code, 0, add_payload)
+        entry_id = add_payload["results"][0]["entry_id"]
+        target = self.workspace / "made" / "nested" / "target.txt"
+
+        code, restored = run_cli(
+            self.storage,
+            "restore",
+            "--to",
+            str(target),
+            "--create-parents",
+            entry_id,
+        )
+        self.assertEqual(code, 0, restored)
+        self.assertEqual(target.read_text(encoding="utf-8"), "content")
+        self.assertEqual(
+            [str(path) for path in (self.workspace / "made").rglob(".safe-delete-*")],
+            [],
+        )
+        staging = self.storage / "trash" / "staging"
+        self.assertTrue(staging.is_dir())
+        self.assertEqual(list(staging.iterdir()), [])
 
     def test_restore_explicit_empty_destination_is_usage_error(self) -> None:
         self.init_storage()
