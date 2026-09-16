@@ -156,6 +156,54 @@ class PurgeTests(unittest.TestCase):
                     RetentionPolicy.resolve(before=value, now=now)
                 self.assertEqual(raised.exception.code, "usage_error")
 
+    def test_retention_overflow_is_usage_error_without_mutation(self) -> None:
+        self.init_storage()
+        entry_id, payload = self.add_file("untouched.txt")
+        ledger_before = (self.storage / "ledger.jsonl").read_bytes()
+        paths_before = sorted(
+            path.relative_to(self.storage).as_posix() for path in self.storage.rglob("*")
+        )
+        payload_before = payload.read_bytes()
+        cases = (
+            (("--older-than", "999999999d"), {}),
+            (("--older-than", "999999999h"), {}),
+            ((), {"SAFE_DELETE_RETENTION_DAYS": "999999999"}),
+            (
+                ("--before", "0001-01-01T00:00:00+23:59"),
+                {},
+            ),
+            (
+                ("--before", "9999-12-31T23:59:59-23:59"),
+                {},
+            ),
+        )
+        for arguments, environment in cases:
+            with self.subTest(arguments=arguments, environment=environment):
+                code, report = self.run_cli(
+                    "purge",
+                    "--dry-run",
+                    *arguments,
+                    env={
+                        "SAFE_DELETE_RETENTION_DAYS": environment.get(
+                            "SAFE_DELETE_RETENTION_DAYS"
+                        )
+                    },
+                )
+                self.assertEqual(code, 2, report)
+                self.assertFalse(report["ok"])
+                self.assertEqual(report["results"], [])
+                self.assertEqual(report["errors"][0]["code"], "usage_error")
+                self.assertNotIn("OverflowError", str(report))
+        self.assertEqual(
+            sorted(
+                path.relative_to(self.storage).as_posix() for path in self.storage.rglob("*")
+            ),
+            paths_before,
+        )
+        self.assertEqual((self.storage / "ledger.jsonl").read_bytes(), ledger_before)
+        self.assertEqual(payload.read_bytes(), payload_before)
+        self.assertTrue(payload.is_file(), entry_id)
+
     def test_retention_boundary_and_age_anchor(self) -> None:
         self.init_storage()
         young_id, young_payload = self.add_file("young.txt")
