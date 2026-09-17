@@ -33,6 +33,7 @@ from .metadata import (
     validate_extensions_object,
     validate_scalar,
 )
+from .hook import hook_disable, hook_install, hook_status, hook_uninstall
 from .move import atomic_move
 from .purge import run_purge
 from .retention import RetentionPolicy
@@ -117,9 +118,15 @@ def build_parser() -> argparse.ArgumentParser:
     hook_parser = commands.add_parser("hook")
     _common_options(hook_parser)
     hook_commands = hook_parser.add_subparsers(dest="hook_command")
-    install_parser = hook_commands.add_parser("install")
-    _common_options(install_parser)
-    install_parser.add_argument("agent", nargs="?")
+    for hook_command in ("install", "status", "disable", "uninstall"):
+        management_parser = hook_commands.add_parser(hook_command)
+        _common_options(management_parser)
+        management_parser.add_argument("selector", nargs="?")
+        management_parser.add_argument("--host", dest="host_selector")
+        management_parser.add_argument("--config")
+        management_parser.add_argument("--project")
+        if hook_command == "install":
+            management_parser.add_argument("--cli", dest="cli_path")
 
     version_parser = commands.add_parser("version")
     _common_options(version_parser)
@@ -385,7 +392,7 @@ def _handle_show(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteEr
 
 
 def _handle_reserved(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
-    command = "hook install" if args.command == "hook" else args.command
+    command = args.command
     return [], [
         error(
             "unsupported_command",
@@ -393,6 +400,30 @@ def _handle_reserved(args: argparse.Namespace) -> tuple[list[Any], list[SafeDele
             command=command,
         )
     ]
+
+
+def _handle_hook(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
+    selector = args.selector
+    host_selector = getattr(args, "host_selector", None)
+    if selector is not None and host_selector is not None and selector != host_selector:
+        return [], [error("usage_error", "hook selector and --host disagree")]
+    selector = selector or host_selector
+    kwargs = {
+        "config": getattr(args, "config", None),
+        "project": getattr(args, "project", None),
+        "root": getattr(args, "root", None),
+    }
+    if args.hook_command == "install":
+        result = hook_install(selector, cli_path=getattr(args, "cli_path", None), **kwargs)
+    elif args.hook_command == "status":
+        return hook_status(selector, **kwargs), []
+    elif args.hook_command == "disable":
+        result = hook_disable(selector, **kwargs)
+    elif args.hook_command == "uninstall":
+        result = hook_uninstall(selector, **kwargs)
+    else:
+        return [], [error("usage_error", "a hook management verb is required")]
+    return [result], []
 
 
 def _with_path(exc: SafeDeleteError, path: str) -> SafeDeleteError:
@@ -785,8 +816,8 @@ def _dispatch(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError
         ], []
     if args.command == "purge":
         return _handle_purge(args)
-    if args.command == "hook" and getattr(args, "hook_command", None) == "install":
-        return _handle_reserved(args)
+    if args.command == "hook":
+        return _handle_hook(args)
     if args.command == "add":
         return _handle_add(args)
     if args.command == "restore":
@@ -796,8 +827,8 @@ def _dispatch(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError
 
 def _parse_error_command(raw_args: list[str]) -> str:
     for index, value in enumerate(raw_args):
-        if value == "hook" and index + 1 < len(raw_args) and raw_args[index + 1] == "install":
-            return "hook install"
+        if value == "hook" and index + 1 < len(raw_args) and raw_args[index + 1] in {"install", "status", "disable", "uninstall"}:
+            return f"hook {raw_args[index + 1]}"
         if value in {"init", "add", "list", "show", "restore", "purge", "version"}:
             return value
     return "safe-delete"
