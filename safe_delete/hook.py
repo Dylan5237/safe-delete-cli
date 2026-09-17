@@ -1876,10 +1876,10 @@ def execute_request(
             decision == "route"
             and require_registration
             and cli_path is None
-            and not os.environ.get("SAFE_DELETE_CLI")
         ):
             # A registered integration captures the exact CLI selected at
-            # install time.  Do not let a later PATH shadow replace it.
+            # install time.  Do not let a later PATH or SAFE_DELETE_CLI
+            # override replace it.
             resolved_cli = _registered_cli_path(adapter)
         else:
             resolved_cli = resolve_cli(cli_path)

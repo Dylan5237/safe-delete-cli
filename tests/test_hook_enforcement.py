@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -70,6 +71,52 @@ class HookEnforcementTests(unittest.TestCase):
         }
         value.update(context)
         return value
+
+    def instrumented_cli(self) -> tuple[Path, Path]:
+        """Return a real CLI wrapper and its one-line-per-call counter."""
+
+        wrapper = self.base / "instrumented-safe-delete"
+        counter = self.base / "safe-delete-calls.log"
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"$*\" >> {shlex.quote(str(counter))}\n"
+            f"exec {shlex.quote(str(CLI))} \"$@\"\n",
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o700)
+        return wrapper, counter
+
+    def raw_sentinels(self) -> tuple[Path, Path]:
+        """Install raw command sentinels that fail if a hook falls back."""
+
+        directory = self.base / "raw-command-sentinels"
+        directory.mkdir()
+        marker = self.base / "raw-command-used.log"
+        for command in ("rm", "unlink", "rmdir"):
+            sentinel = directory / command
+            sentinel.write_text(
+                "#!/bin/sh\n"
+                f"printf '%s\\n' {command} >> {shlex.quote(str(marker))}\n"
+                "exit 97\n",
+                encoding="utf-8",
+            )
+            sentinel.chmod(0o700)
+        return directory, marker
+
+    def run_installed_pretooluse(
+        self,
+        request: dict[str, object],
+        *,
+        environment: dict[str, str],
+    ) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            [str(package_paths()["pretooluse"])],
+            input=json.dumps(request).encode("utf-8"),
+            cwd=str(self.workspace),
+            env=environment,
+            capture_output=True,
+            check=False,
+        )
 
     def test_supported_vectors_have_one_exact_rewrite(self) -> None:
         cases = [
@@ -608,6 +655,135 @@ class HookEnforcementTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 2)
         self.assertFalse(marker.exists())
 
+    def test_registered_cli_ignores_safe_delete_cli_override(self) -> None:
+        initialize_layout(str(self.storage))
+        registered_cli, calls = self.instrumented_cli()
+        hook_install(
+            "claude",
+            config=str(self.base / "claude.json"),
+            cli_path=str(registered_cli),
+            root=str(self.storage),
+        )
+        fake_marker = self.base / "fake-cli-used"
+        fake_cli = self.base / "fake-safe-delete"
+        fake_cli.write_text(
+            "#!/bin/sh\n"
+            f"printf used > {shlex.quote(str(fake_marker))}\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        fake_cli.chmod(0o700)
+        target = self.workspace / "registered-cli-target"
+        target.write_text("payload", encoding="utf-8")
+
+        with patch.dict(os.environ, {"SAFE_DELETE_CLI": str(fake_cli)}, clear=False):
+            result = execute_request(
+                self.request(["rm", str(target)]),
+                environment=dict(os.environ),
+            )
+
+        self.assertEqual(result.response["decision"], "route")
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(target.exists())
+        self.assertFalse(fake_marker.exists())
+        self.assertEqual(len(calls.read_text(encoding="utf-8").splitlines()), 1)
+        self.assertEqual(len((self.storage / "ledger.jsonl").read_text(encoding="utf-8").splitlines()), 1)
+
+    def test_installed_pretooluse_routes_real_vectors_once_without_raw_fallback(self) -> None:
+        initialize_layout(str(self.storage))
+        registered_cli, calls = self.instrumented_cli()
+        raw_dir, raw_marker = self.raw_sentinels()
+        hook_install(
+            "claude",
+            config=str(self.base / "claude.json"),
+            cli_path=str(registered_cli),
+            root=str(self.storage),
+        )
+        environment = dict(os.environ)
+        environment["PATH"] = str(raw_dir) + os.pathsep + environment.get("PATH", "")
+        cases = (
+            ("rm", ["-rf", "--"], self.workspace / "pretooluse-rm"),
+            ("unlink", ["--"], self.workspace / "pretooluse-unlink"),
+            ("rmdir", ["--"], self.workspace / "pretooluse-rmdir"),
+        )
+        for command, options, target in cases:
+            with self.subTest(command=command):
+                if command == "rmdir":
+                    target.mkdir()
+                else:
+                    target.write_text(command, encoding="utf-8")
+                completed = self.run_installed_pretooluse(
+                    self.request([command, *options, str(target)]),
+                    environment=environment,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+                response = json.loads(completed.stdout.decode("utf-8"))
+                self.assertEqual(response["decision"], "route")
+                self.assertFalse(target.exists())
+
+        self.assertFalse(raw_marker.exists())
+        self.assertEqual(len(calls.read_text(encoding="utf-8").splitlines()), 3)
+        self.assertEqual(len((self.storage / "ledger.jsonl").read_text(encoding="utf-8").splitlines()), 3)
+
+    def test_installed_path_routes_real_vectors_once_without_raw_fallback(self) -> None:
+        initialize_layout(str(self.storage))
+        registered_cli, calls = self.instrumented_cli()
+        raw_dir, raw_marker = self.raw_sentinels()
+        hook_install("path-shim", cli_path=str(registered_cli), root=str(self.storage))
+        shim_dir = package_paths()["bin"]
+        environment = dict(os.environ)
+        environment["PATH"] = os.pathsep.join(
+            [str(shim_dir), str(raw_dir), environment.get("PATH", "")]
+        )
+        cases = (
+            ("rm", ["-R", "-f", "--"], self.workspace / "path-rm"),
+            ("unlink", ["--"], self.workspace / "path-unlink"),
+            ("rmdir", ["--"], self.workspace / "path-rmdir"),
+        )
+        for command, options, target in cases:
+            with self.subTest(command=command):
+                if command == "rmdir":
+                    target.mkdir()
+                else:
+                    target.write_text(command, encoding="utf-8")
+                completed = subprocess.run(
+                    [command, *options, str(target)],
+                    cwd=str(self.workspace),
+                    env=environment,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+                self.assertFalse(target.exists())
+
+        self.assertFalse(raw_marker.exists())
+        self.assertEqual(len(calls.read_text(encoding="utf-8").splitlines()), 3)
+        self.assertEqual(len((self.storage / "ledger.jsonl").read_text(encoding="utf-8").splitlines()), 3)
+
+    def test_installed_route_propagates_real_cli_failure_without_raw_fallback(self) -> None:
+        initialize_layout(str(self.storage))
+        registered_cli, calls = self.instrumented_cli()
+        raw_dir, raw_marker = self.raw_sentinels()
+        hook_install(
+            "claude",
+            config=str(self.base / "claude.json"),
+            cli_path=str(registered_cli),
+            root=str(self.storage),
+        )
+        environment = dict(os.environ)
+        environment["PATH"] = str(raw_dir) + os.pathsep + environment.get("PATH", "")
+        completed = self.run_installed_pretooluse(
+            self.request(["rm", "missing-real-route-target"]),
+            environment=environment,
+        )
+        self.assertEqual(completed.returncode, 2, completed.stderr.decode())
+        response = json.loads(completed.stdout.decode("utf-8"))
+        self.assertEqual(response["decision"], "deny")
+        self.assertEqual(response["reason_code"], "source_not_found")
+        self.assertFalse(raw_marker.exists())
+        self.assertEqual(len(calls.read_text(encoding="utf-8").splitlines()), 1)
+        self.assertEqual((self.storage / "ledger.jsonl").read_text(encoding="utf-8"), "")
+
     def test_status_rejects_relocated_or_broken_payload_dependency(self) -> None:
         initialize_layout(str(self.storage))
         hook_install("claude", config=str(self.base / "claude.json"), cli_path=str(CLI), root=str(self.storage))
@@ -709,6 +885,92 @@ class HookEnforcementTests(unittest.TestCase):
                 response = decide_request(self.request(argv))
                 self.assertEqual(response["decision"], "deny")
                 self.assertEqual(response["reason_code"], "unsupported_delete_invocation")
+
+    def test_bypass_replay_executes_representative_out_of_coverage_commands(self) -> None:
+        initialize_layout(str(self.storage))
+        ledger = self.storage / "ledger.jsonl"
+        ledger_before = ledger.read_bytes()
+        raw_dir = self.base / "raw-bypass"
+        raw_dir.mkdir()
+        raw_marker = self.base / "raw-bypass-used.log"
+        raw_rm = raw_dir / "rm"
+        raw_rm.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' raw-rm >> {shlex.quote(str(raw_marker))}\n"
+            f"exec /bin/rm \"$@\"\n",
+            encoding="utf-8",
+        )
+        raw_rm.chmod(0o700)
+
+        replays: list[tuple[str, list[str], str, int]] = []
+
+        def run_bypass(label: str, argv: list[str], cwd: Path, env: dict[str, str] | None = None) -> None:
+            completed = subprocess.run(
+                argv,
+                cwd=str(cwd),
+                env=dict(os.environ) if env is None else env,
+                capture_output=True,
+                check=False,
+            )
+            replays.append((label, argv, str(cwd), completed.returncode))
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+
+        api_target = self.workspace / "api-target"
+        api_target.write_text("api", encoding="utf-8")
+        run_bypass(
+            "Python filesystem API",
+            [sys.executable, "-c", "import os; os.unlink('api-target')"],
+            self.workspace,
+        )
+
+        find_target = self.workspace / "find-target"
+        find_target.write_text("find", encoding="utf-8")
+        run_bypass(
+            "find -delete",
+            ["find", ".", "-maxdepth", "1", "-name", "find-target", "-delete"],
+            self.workspace,
+        )
+
+        git_workspace = self.base / "git-workspace"
+        git_workspace.mkdir()
+        initialized = subprocess.run(
+            ["git", "init", "-q"],
+            cwd=str(git_workspace),
+            env=dict(os.environ),
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(initialized.returncode, 0, initialized.stderr.decode())
+        git_target = git_workspace / "git-target"
+        git_target.write_text("git", encoding="utf-8")
+        run_bypass("git clean", ["git", "clean", "-fdq"], git_workspace)
+
+        absolute_target = self.workspace / "absolute-target"
+        absolute_target.write_text("absolute", encoding="utf-8")
+        run_bypass("absolute /bin/rm", ["/bin/rm", str(absolute_target)], self.workspace)
+
+        hook_install("path-shim", cli_path=str(CLI), root=str(self.storage))
+        reordered_target = self.workspace / "path-reordered-target"
+        reordered_target.write_text("reordered", encoding="utf-8")
+        reordered_environment = dict(os.environ)
+        reordered_environment["PATH"] = str(raw_dir) + os.pathsep + str(package_paths()["bin"])
+        run_bypass("PATH reordering", ["rm", str(reordered_target)], self.workspace, reordered_environment)
+
+        removed_target = self.workspace / "removed-shim-target"
+        removed_target.write_text("removed", encoding="utf-8")
+        removed_environment = dict(os.environ)
+        removed_environment["PATH"] = os.defpath
+        run_bypass("removed PATH shim", ["rm", str(removed_target)], self.workspace, removed_environment)
+
+        self.assertFalse(api_target.exists())
+        self.assertFalse(find_target.exists())
+        self.assertFalse(git_target.exists())
+        self.assertFalse(absolute_target.exists())
+        self.assertFalse(reordered_target.exists())
+        self.assertFalse(removed_target.exists())
+        self.assertEqual(raw_marker.read_text(encoding="utf-8").splitlines(), ["raw-rm"])
+        self.assertEqual(ledger.read_bytes(), ledger_before)
+        self.assertEqual(len(replays), 6)
 
     def test_unwritable_ledger_fails_closed_without_child(self) -> None:
         initialize_layout(str(self.storage))
