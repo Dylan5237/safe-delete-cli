@@ -1,0 +1,55 @@
+artifact_status=CAPTURED
+proof=03_cli_purge.sh plus P5 dry-run unit assertion
+replay_status=CAPTURED
+checkout=$CHECKOUT ($CHECKOUT)
+testroot=$TESTROOT ($TESTROOT)
+safe_delete_root=$SAFE_DELETE_ROOT ($TESTROOT/safe-delete-root)
+workspace=$P6_WORKSPACE ($TESTROOT/workspace)
+home=$P6_HOME ($TESTROOT/home)
+xdg_data_home=$P6_XDG_DATA_HOME ($TESTROOT/xdg-data)
+xdg_config_home=$P6_XDG_CONFIG_HOME ($TESTROOT/xdg-config)
+product_sha=2710abb4e10d1ac473f007e94f00001d267a77ea
+evidence_sha=f5b0fd601dcbe7bb5ae28b7e79f1c8a6d7ccb25f
+cwd=$CHECKOUT
+utc_start=2026-09-17T03:12:03Z
+python=Python 3.13.5
+os=Linux 6.12.94+ x86_64
+git_status=clean
+
+== init ==
+{"command":"init","ok":true,"results":[{"root":"$TESTROOT/safe-delete-root","ledger_path":"$TESTROOT/safe-delete-root/ledger.jsonl","lock_path":"$TESTROOT/safe-delete-root/locks/ledger.lock","trash_path":"$TESTROOT/safe-delete-root/trash","objects_path":"$TESTROOT/safe-delete-root/trash/objects"}],"errors":[]}
+
+== create a restored exclusion ==
+{"command":"add","ok":true,"results":[{"entry_id":"4881bd31-a879-4816-8dd4-2014deccba36","path":"$TESTROOT/workspace/restored-before-purge.txt","original_path":"$TESTROOT/workspace/restored-before-purge.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/4881bd31-a879-4816-8dd4-2014deccba36/payload","kind":"file","state":"active","project":"$CHECKOUT","session_id":null,"reason":null,"agent":null,"tool":"safe-delete-cli","extensions":null}],"errors":[]}
+{"command":"restore","ok":true,"results":[{"entry_id":"4881bd31-a879-4816-8dd4-2014deccba36","state":"restored","original_path":"$TESTROOT/workspace/restored-before-purge.txt","restore_path":"$TESTROOT/workspace/restored-before-purge.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/4881bd31-a879-4816-8dd4-2014deccba36/payload","kind":"file","project":"$CHECKOUT","session_id":null,"reason":null,"agent":null,"tool":"safe-delete-cli","extensions":null}],"errors":[]}
+
+== create an active purge candidate ==
+{"command":"add","ok":true,"results":[{"entry_id":"39e9c6bd-ec57-4ebf-bbc1-cd4719416ab1","path":"$TESTROOT/workspace/purge-candidate.txt","original_path":"$TESTROOT/workspace/purge-candidate.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/39e9c6bd-ec57-4ebf-bbc1-cd4719416ab1/payload","kind":"file","state":"active","project":"$CHECKOUT","session_id":null,"reason":null,"agent":null,"tool":"safe-delete-cli","extensions":null}],"errors":[]}
+
+== explicit dry-run with a short retention threshold ==
+{"command":"purge","ok":true,"results":[{"mode":"dry_run","dry_run":true,"policy":{"source":"older_than","as_of":"2026-09-17T03:12:04.372576Z","cutoff":"2026-09-17T02:12:04.372576Z","cutoff_utc":"2026-09-17T02:12:04.372576Z","threshold_days":0.041666666666666664,"threshold_duration":"1h","threshold_seconds":3600},"candidates":[],"decisions":[{"entry_id":"39e9c6bd-ec57-4ebf-bbc1-cd4719416ab1","state":"active","original_path":"$TESTROOT/workspace/purge-candidate.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/39e9c6bd-ec57-4ebf-bbc1-cd4719416ab1/payload","kind":"file","timestamp":"2026-09-17T03:12:04.242597Z","decision":"excluded","reason":"too_young","age_anchor":"2026-09-17T03:12:04.242597Z","last_event":{"event_id":"6d0b08fe-2710-4b8b-8a63-24724120837f","operation":"trash","timestamp":"2026-09-17T03:12:04.242597Z"}},{"entry_id":"4881bd31-a879-4816-8dd4-2014deccba36","state":"restored","original_path":"$TESTROOT/workspace/restored-before-purge.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/4881bd31-a879-4816-8dd4-2014deccba36/payload","kind":"file","timestamp":"2026-09-17T03:12:04.050659Z","decision":"excluded","reason":"restored","age_anchor":"2026-09-17T03:12:04.050659Z","last_event":{"event_id":"19e73daa-27e8-4e29-a898-b7111d936919","operation":"restore","timestamp":"2026-09-17T03:12:04.159446Z"}}],"outcomes":[]}],"errors":[]}
+
+== controlled execute boundary ==
+controlled_cutoff=2026-09-17T03:13:04Z
+{"command":"purge","ok":true,"results":[{"mode":"execute","dry_run":false,"policy":{"source":"before","as_of":"2026-09-17T03:12:04.489416Z","cutoff":"2026-09-17T03:13:04Z","cutoff_utc":"2026-09-17T03:13:04Z","threshold_days":null,"threshold_duration":null},"candidates":["39e9c6bd-ec57-4ebf-bbc1-cd4719416ab1"],"decisions":[{"entry_id":"39e9c6bd-ec57-4ebf-bbc1-cd4719416ab1","state":"active","original_path":"$TESTROOT/workspace/purge-candidate.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/39e9c6bd-ec57-4ebf-bbc1-cd4719416ab1/payload","kind":"file","timestamp":"2026-09-17T03:12:04.242597Z","decision":"candidate","reason":"eligible","age_anchor":"2026-09-17T03:12:04.242597Z","last_event":{"event_id":"6d0b08fe-2710-4b8b-8a63-24724120837f","operation":"trash","timestamp":"2026-09-17T03:12:04.242597Z"}},{"entry_id":"4881bd31-a879-4816-8dd4-2014deccba36","state":"restored","original_path":"$TESTROOT/workspace/restored-before-purge.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/4881bd31-a879-4816-8dd4-2014deccba36/payload","kind":"file","timestamp":"2026-09-17T03:12:04.050659Z","decision":"excluded","reason":"restored","age_anchor":"2026-09-17T03:12:04.050659Z","last_event":{"event_id":"19e73daa-27e8-4e29-a898-b7111d936919","operation":"restore","timestamp":"2026-09-17T03:12:04.159446Z"}}],"outcomes":[{"entry_id":"39e9c6bd-ec57-4ebf-bbc1-cd4719416ab1","state":"purged","outcome":"purged","code":"purge_complete","intent_event_id":"6ca3b7a5-2ffe-4db4-b955-d0fb0d6f4d30","complete_event_id":"c41bcb0b-6424-41b1-8dcc-a0a162f4dd0e","recovered":false}]}],"errors":[]}
+
+== post-purge inspection ==
+{"command":"list","ok":true,"results":[{"entry_id":"39e9c6bd-ec57-4ebf-bbc1-cd4719416ab1","state":"purged","original_path":"$TESTROOT/workspace/purge-candidate.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/39e9c6bd-ec57-4ebf-bbc1-cd4719416ab1/payload","kind":"file","timestamp":"2026-09-17T03:12:04.242597Z","project":"$CHECKOUT","session_id":null,"reason":null,"agent":null,"tool":"safe-delete-cli","extensions":null},{"entry_id":"4881bd31-a879-4816-8dd4-2014deccba36","state":"restored","original_path":"$TESTROOT/workspace/restored-before-purge.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/4881bd31-a879-4816-8dd4-2014deccba36/payload","kind":"file","timestamp":"2026-09-17T03:12:04.050659Z","project":"$CHECKOUT","session_id":null,"reason":null,"agent":null,"tool":"safe-delete-cli","extensions":null}],"errors":[]}
+utc_end=2026-09-17T03:12:04Z
+replay_marker=CAPTURED
+--- dry-run policy and no-mutation assertion ---
+replay_status=CAPTURED
+product_sha=2710abb4e10d1ac473f007e94f00001d267a77ea
+evidence_sha=f5b0fd601dcbe7bb5ae28b7e79f1c8a6d7ccb25f
+cwd=$CHECKOUT
+utc_start=2026-09-17T03:12:36Z
+command=python3 -m unittest -v tests.test_purge.PurgeTests.test_dry_run_json_policy_exclusions_and_no_mutation
+test_dry_run_json_policy_exclusions_and_no_mutation (tests.test_purge.PurgeTests.test_dry_run_json_policy_exclusions_and_no_mutation) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.287s
+
+OK
+exit_code=0
+utc_end=2026-09-17T03:12:36Z
+replay_marker=CAPTURED

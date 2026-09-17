@@ -1,0 +1,41 @@
+replay_status=CAPTURED
+checkout=$CHECKOUT ($CHECKOUT)
+testroot=$TESTROOT ($TESTROOT)
+safe_delete_root=$SAFE_DELETE_ROOT ($TESTROOT/safe-delete-root)
+workspace=$P6_WORKSPACE ($TESTROOT/workspace)
+home=$P6_HOME ($TESTROOT/home)
+xdg_data_home=$P6_XDG_DATA_HOME ($TESTROOT/xdg-data)
+xdg_config_home=$P6_XDG_CONFIG_HOME ($TESTROOT/xdg-config)
+product_sha=2710abb4e10d1ac473f007e94f00001d267a77ea
+evidence_sha=f5b0fd601dcbe7bb5ae28b7e79f1c8a6d7ccb25f
+cwd=$CHECKOUT
+utc_start=2026-09-17T03:12:09Z
+python=Python 3.13.5
+os=Linux 6.12.94+ x86_64
+git_status=clean
+
+== frozen bypass inventory ==
+out_of_coverage=Python/Go/Node filesystem APIs
+out_of_coverage=find -delete
+out_of_coverage=git clean
+out_of_coverage=busybox rm
+out_of_coverage=absolute /bin/rm, /bin/unlink, or /bin/rmdir
+out_of_coverage=another unconfigured agent/tool
+out_of_coverage=a container or namespace without the hook
+out_of_coverage=a privileged or human process
+out_of_coverage=PATH reordering
+out_of_coverage=disabled or uninstalled integration
+
+== representative bypass replay ==
+python3 -m unittest -v tests.test_hook_enforcement.HookEnforcementTests.test_bypass_replay_is_documented_as_out_of_coverage tests.test_hook_enforcement.HookEnforcementTests.test_bypass_replay_executes_representative_out_of_coverage_commands tests.test_hook_enforcement.HookEnforcementTests.test_bypass_inventory_is_reported_as_out_of_coverage
+test_bypass_replay_is_documented_as_out_of_coverage (tests.test_hook_enforcement.HookEnforcementTests.test_bypass_replay_is_documented_as_out_of_coverage) ... ok
+test_bypass_replay_executes_representative_out_of_coverage_commands (tests.test_hook_enforcement.HookEnforcementTests.test_bypass_replay_executes_representative_out_of_coverage_commands) ... ok
+test_bypass_inventory_is_reported_as_out_of_coverage (tests.test_hook_enforcement.HookEnforcementTests.test_bypass_inventory_is_reported_as_out_of_coverage) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.342s
+
+OK
+classification=expected_direct_deletion_without_hook; not a supported-hook failure
+utc_end=2026-09-17T03:12:10Z
+replay_marker=CAPTURED

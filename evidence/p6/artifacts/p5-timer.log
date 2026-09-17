@@ -1,0 +1,23 @@
+replay_status=CAPTURED
+product_sha=2710abb4e10d1ac473f007e94f00001d267a77ea
+evidence_sha=f5b0fd601dcbe7bb5ae28b7e79f1c8a6d7ccb25f
+cwd=$CHECKOUT
+utc_start=2026-09-17T03:13:18Z
+command=git show 2710abb4e10d1ac473f007e94f00001d267a77ea:README.md; grep -F exact daily invocation
+`safe-delete purge` previews eligible entries by default. Set
+`SAFE_DELETE_RETENTION_DAYS` to a positive decimal integer, or use one of the
+per-invocation overrides `--older-than Nd`/`--older-than Nh` (for example
+`30d` or `720h`) and `--before RFC3339`. Physical removal requires both
+`--execute` and `--yes`:
+
+```cron
+0 2 * * * /usr/bin/safe-delete purge --execute --yes --json
+```
+
+Installing the cron/systemd timer is the operator's responsibility; the CLI
+does not install a scheduler.
+0 2 * * * /usr/bin/safe-delete purge --execute --yes --json
+observed=exact documented daily invocation present; scheduler installation not performed (operator-owned)
+exit_code=0
+utc_end=2026-09-17T03:13:18Z
+replay_marker=CAPTURED

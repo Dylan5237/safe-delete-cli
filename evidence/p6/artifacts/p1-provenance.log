@@ -1,0 +1,16 @@
+replay_status=CAPTURED
+product_sha=2710abb4e10d1ac473f007e94f00001d267a77ea
+evidence_sha=f5b0fd601dcbe7bb5ae28b7e79f1c8a6d7ccb25f
+cwd=$CHECKOUT
+utc_start=2026-09-17T03:15:21Z
+command=git grep -n -e P6 Contract Freeze status -e Evidence matrix and record contract 2710abb4e10d1ac473f007e94f00001d267a77ea -- docs/architecture/freeze.md
+2710abb4e10d1ac473f007e94f00001d267a77ea:docs/architecture/freeze.md:884:### P6 Contract Freeze status (Issue #8)
+2710abb4e10d1ac473f007e94f00001d267a77ea:docs/architecture/freeze.md:901:#### Evidence matrix and record contract
+command=git grep -n -e same-UID -e Exception 2710abb4e10d1ac473f007e94f00001d267a77ea -- docs/architecture/exceptions.md
+2710abb4e10d1ac473f007e94f00001d267a77ea:docs/architecture/exceptions.md:3:## P2: same-UID staging publication
+2710abb4e10d1ac473f007e94f00001d267a77ea:docs/architecture/exceptions.md:12:destination/shared tree, but does not claim isolation from same-UID mutation of
+issue_8_freeze_ack=https://github.com/Dylan5237/safe-delete-cli/issues/8#issuecomment-5701547385
+observed=Freeze ACK is recorded on Issue #8; this artifact is provenance only and makes no runtime or Phase Accept claim
+exit_code=0
+utc_end=2026-09-17T03:15:21Z
+replay_marker=CAPTURED

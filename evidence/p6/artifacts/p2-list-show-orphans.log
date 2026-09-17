@@ -1,0 +1,64 @@
+artifact_status=CAPTURED
+proof=01_cli_trash_restore.sh plus injected orphan unit test
+replay_status=CAPTURED
+checkout=$CHECKOUT ($CHECKOUT)
+testroot=$TESTROOT ($TESTROOT)
+safe_delete_root=$SAFE_DELETE_ROOT ($TESTROOT/safe-delete-root)
+workspace=$P6_WORKSPACE ($TESTROOT/workspace)
+home=$P6_HOME ($TESTROOT/home)
+xdg_data_home=$P6_XDG_DATA_HOME ($TESTROOT/xdg-data)
+xdg_config_home=$P6_XDG_CONFIG_HOME ($TESTROOT/xdg-config)
+product_sha=2710abb4e10d1ac473f007e94f00001d267a77ea
+evidence_sha=f5b0fd601dcbe7bb5ae28b7e79f1c8a6d7ccb25f
+cwd=$CHECKOUT
+utc_start=2026-09-17T03:12:02Z
+python=Python 3.13.5
+os=Linux 6.12.94+ x86_64
+git_status=clean
+
+== version before init ==
+{"command":"version","ok":true,"results":[{"version":"0.1.0","contract_version":1,"schema_version":1}],"errors":[]}
+
+== init ==
+{"command":"init","ok":true,"results":[{"root":"$TESTROOT/safe-delete-root","ledger_path":"$TESTROOT/safe-delete-root/ledger.jsonl","lock_path":"$TESTROOT/safe-delete-root/locks/ledger.lock","trash_path":"$TESTROOT/safe-delete-root/trash","objects_path":"$TESTROOT/safe-delete-root/trash/objects"}],"errors":[]}
+
+== add file and directory ==
+{"command":"add","ok":true,"results":[{"entry_id":"c77763d6-0b3c-4f6a-bb47-83c913a7895f","path":"$TESTROOT/workspace/file.txt","original_path":"$TESTROOT/workspace/file.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/c77763d6-0b3c-4f6a-bb47-83c913a7895f/payload","kind":"file","state":"active","project":"$CHECKOUT","session_id":null,"reason":null,"agent":null,"tool":"safe-delete-cli","extensions":null},{"entry_id":"4f4bbc3f-a31a-406f-a9bd-e31d5cb1983e","path":"$TESTROOT/workspace/tree","original_path":"$TESTROOT/workspace/tree","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/4f4bbc3f-a31a-406f-a9bd-e31d5cb1983e/payload","kind":"directory","state":"active","project":"$CHECKOUT","session_id":null,"reason":null,"agent":null,"tool":"safe-delete-cli","extensions":null}],"errors":[]}
+
+== list ==
+{"command":"list","ok":true,"results":[{"entry_id":"4f4bbc3f-a31a-406f-a9bd-e31d5cb1983e","state":"active","original_path":"$TESTROOT/workspace/tree","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/4f4bbc3f-a31a-406f-a9bd-e31d5cb1983e/payload","kind":"directory","timestamp":"2026-09-17T03:12:02.700996Z","project":"$CHECKOUT","session_id":null,"reason":null,"agent":null,"tool":"safe-delete-cli","extensions":null},{"entry_id":"c77763d6-0b3c-4f6a-bb47-83c913a7895f","state":"active","original_path":"$TESTROOT/workspace/file.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/c77763d6-0b3c-4f6a-bb47-83c913a7895f/payload","kind":"file","timestamp":"2026-09-17T03:12:02.699952Z","project":"$CHECKOUT","session_id":null,"reason":null,"agent":null,"tool":"safe-delete-cli","extensions":null}],"errors":[]}
+
+== show file entry ==
+{"command":"show","ok":true,"results":[{"entry_id":"c77763d6-0b3c-4f6a-bb47-83c913a7895f","state":"active","creation":{"schema_version":1,"event_id":"a5d7d1dd-7669-4e10-b922-1f46394347a2","entry_id":"c77763d6-0b3c-4f6a-bb47-83c913a7895f","operation":"trash","state":"active","original_path":"$TESTROOT/workspace/file.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/c77763d6-0b3c-4f6a-bb47-83c913a7895f/payload","kind":"file","timestamp":"2026-09-17T03:12:02.699952Z","project":"$CHECKOUT","session_id":null,"reason":null,"agent":null,"tool":"safe-delete-cli","extensions":null},"events":[{"schema_version":1,"event_id":"a5d7d1dd-7669-4e10-b922-1f46394347a2","entry_id":"c77763d6-0b3c-4f6a-bb47-83c913a7895f","operation":"trash","state":"active","original_path":"$TESTROOT/workspace/file.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/c77763d6-0b3c-4f6a-bb47-83c913a7895f/payload","kind":"file","timestamp":"2026-09-17T03:12:02.699952Z","project":"$CHECKOUT","session_id":null,"reason":null,"agent":null,"tool":"safe-delete-cli","extensions":null}]}],"errors":[]}
+
+== orphan report ==
+{"command":"list","ok":true,"results":[],"errors":[]}
+
+== occupied destination refusal ==
+exit_code=3
+{"command":"restore","ok":false,"results":[],"errors":[{"code":"destination_exists","message":"restore destination already exists: $TESTROOT/workspace/collision-target.txt","entry_id":"c77763d6-0b3c-4f6a-bb47-83c913a7895f","path":"$TESTROOT/workspace/collision-target.txt"}]}
+
+== restore file and directory ==
+{"command":"restore","ok":true,"results":[{"entry_id":"c77763d6-0b3c-4f6a-bb47-83c913a7895f","state":"restored","original_path":"$TESTROOT/workspace/file.txt","restore_path":"$TESTROOT/workspace/file.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/c77763d6-0b3c-4f6a-bb47-83c913a7895f/payload","kind":"file","project":"$CHECKOUT","session_id":null,"reason":null,"agent":null,"tool":"safe-delete-cli","extensions":null}],"errors":[]}
+{"command":"restore","ok":true,"results":[{"entry_id":"4f4bbc3f-a31a-406f-a9bd-e31d5cb1983e","state":"restored","original_path":"$TESTROOT/workspace/tree","restore_path":"$TESTROOT/workspace/tree","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/4f4bbc3f-a31a-406f-a9bd-e31d5cb1983e/payload","kind":"directory","project":"$CHECKOUT","session_id":null,"reason":null,"agent":null,"tool":"safe-delete-cli","extensions":null}],"errors":[]}
+
+== lifecycle history ==
+{"command":"list","ok":true,"results":[{"entry_id":"4f4bbc3f-a31a-406f-a9bd-e31d5cb1983e","state":"restored","original_path":"$TESTROOT/workspace/tree","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/4f4bbc3f-a31a-406f-a9bd-e31d5cb1983e/payload","kind":"directory","timestamp":"2026-09-17T03:12:02.700996Z","project":"$CHECKOUT","session_id":null,"reason":null,"agent":null,"tool":"safe-delete-cli","extensions":null},{"entry_id":"c77763d6-0b3c-4f6a-bb47-83c913a7895f","state":"restored","original_path":"$TESTROOT/workspace/file.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/c77763d6-0b3c-4f6a-bb47-83c913a7895f/payload","kind":"file","timestamp":"2026-09-17T03:12:02.699952Z","project":"$CHECKOUT","session_id":null,"reason":null,"agent":null,"tool":"safe-delete-cli","extensions":null}],"errors":[]}
+utc_end=2026-09-17T03:12:03Z
+replay_marker=CAPTURED
+--- injected orphan assertion ---
+replay_status=CAPTURED
+product_sha=2710abb4e10d1ac473f007e94f00001d267a77ea
+evidence_sha=f5b0fd601dcbe7bb5ae28b7e79f1c8a6d7ccb25f
+cwd=$CHECKOUT
+utc_start=2026-09-17T03:12:34Z
+command=python3 -m unittest -v tests.test_cli_contract.CliContractTests.test_list_reports_injected_orphan
+test_list_reports_injected_orphan (tests.test_cli_contract.CliContractTests.test_list_reports_injected_orphan) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.167s
+
+OK
+exit_code=0
+utc_end=2026-09-17T03:12:34Z
+replay_marker=CAPTURED

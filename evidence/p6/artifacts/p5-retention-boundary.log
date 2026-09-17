@@ -1,0 +1,15 @@
+replay_status=CAPTURED
+product_sha=2710abb4e10d1ac473f007e94f00001d267a77ea
+evidence_sha=f5b0fd601dcbe7bb5ae28b7e79f1c8a6d7ccb25f
+cwd=$CHECKOUT
+utc_start=2026-09-17T03:12:36Z
+command=python3 -m unittest -v tests.test_purge.PurgeTests.test_retention_boundary_and_age_anchor
+test_retention_boundary_and_age_anchor (tests.test_purge.PurgeTests.test_retention_boundary_and_age_anchor) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.308s
+
+OK
+exit_code=0
+utc_end=2026-09-17T03:12:36Z
+replay_marker=CAPTURED

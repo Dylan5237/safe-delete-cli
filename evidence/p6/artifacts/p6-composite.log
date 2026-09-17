@@ -1,0 +1,58 @@
+replay_status=CAPTURED
+checkout=$CHECKOUT ($CHECKOUT)
+testroot=$TESTROOT ($TESTROOT)
+safe_delete_root=$SAFE_DELETE_ROOT ($TESTROOT/safe-delete-root)
+workspace=$P6_WORKSPACE ($TESTROOT/workspace)
+home=$P6_HOME ($TESTROOT/home)
+xdg_data_home=$P6_XDG_DATA_HOME ($TESTROOT/xdg-data)
+xdg_config_home=$P6_XDG_CONFIG_HOME ($TESTROOT/xdg-config)
+product_sha=2710abb4e10d1ac473f007e94f00001d267a77ea
+evidence_sha=f5b0fd601dcbe7bb5ae28b7e79f1c8a6d7ccb25f
+cwd=$CHECKOUT
+utc_start=2026-09-17T03:12:10Z
+python=Python 3.13.5
+os=Linux 6.12.94+ x86_64
+git_status=clean
+
+== init and install ==
+{"command":"init","ok":true,"results":[{"root":"$TESTROOT/safe-delete-root","ledger_path":"$TESTROOT/safe-delete-root/ledger.jsonl","lock_path":"$TESTROOT/safe-delete-root/locks/ledger.lock","trash_path":"$TESTROOT/safe-delete-root/trash","objects_path":"$TESTROOT/safe-delete-root/trash/objects"}],"errors":[]}
+{"command":"hook install","ok":true,"results":[{"selector":"claude","mode":"pretooluse","enabled":true,"installed":true,"registry_valid":true,"enforced":true,"cli_path":"$TESTROOT/instrumented-safe-delete","package":{"version":"v1","adapter_path":"$TESTROOT/xdg-data/safe-delete/hooks/v1/pretooluse","adapter_runnable":true},"boundary":{"config_path":"$TESTROOT/claude-settings.json","registered":true},"storage":{"root":"$TESTROOT/safe-delete-root","ledger":"$TESTROOT/safe-delete-root/ledger.jsonl","usable":true},"out_of_coverage":["Python/Go/Node filesystem APIs","find -delete","git clean","busybox rm","absolute /bin/rm, /bin/unlink, or /bin/rmdir","another unconfigured agent/tool","a container or namespace without the hook","a privileged or human process","PATH reordering","disabled or uninstalled integration"],"changed":true,"config_created":true,"path_activation":null}],"errors":[]}
+
+== hook -> safe-delete add ==
+request={"protocol_version":1,"request_id":"p6-composite-request","tool":"claude-bash","argv":["rm","--","$TESTROOT/workspace/composite-hook-target.txt"],"cwd":"$TESTROOT/workspace","project":"$TESTROOT/workspace","session_id":"p6-composite-session","agent":"codex/luna","reason":"p6 composite deletion"}
+exit_code=0
+response={"protocol_version":1,"request_id":"p6-composite-request","decision":"route","reason_code":"raw_delete","safe_delete_argv":["safe-delete","add","--project","$TESTROOT/workspace","--session-id","p6-composite-session","--agent","codex/luna","--reason","p6 composite deletion","--tool","pretooluse:claude-bash","--","$TESTROOT/workspace/composite-hook-target.txt"]}
+child_output={"agent": "codex/luna", "entry_id": "1c803a91-219e-4ea0-b6c4-4f01ddba957d", "extensions": null, "kind": "file", "original_path": "$TESTROOT/workspace/composite-hook-target.txt", "path": "$TESTROOT/workspace/composite-hook-target.txt", "project": "$TESTROOT/workspace", "reason": "p6 composite deletion", "session_id": "p6-composite-session", "state": "active", "tool": "pretooluse:claude-bash", "trashed_path": "$TESTROOT/safe-delete-root/trash/objects/1c803a91-219e-4ea0-b6c4-4f01ddba957d/payload"}
+hook_entry_id=1c803a91-219e-4ea0-b6c4-4f01ddba957d
+
+== list and show ==
+list={"command":"list","ok":true,"results":[{"entry_id":"1c803a91-219e-4ea0-b6c4-4f01ddba957d","state":"active","original_path":"$TESTROOT/workspace/composite-hook-target.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/1c803a91-219e-4ea0-b6c4-4f01ddba957d/payload","kind":"file","timestamp":"2026-09-17T03:12:10.896897Z","project":"$TESTROOT/workspace","session_id":"p6-composite-session","reason":"p6 composite deletion","agent":"codex/luna","tool":"pretooluse:claude-bash","extensions":null}],"errors":[]}
+show={"command":"show","ok":true,"results":[{"entry_id":"1c803a91-219e-4ea0-b6c4-4f01ddba957d","state":"active","creation":{"schema_version":1,"event_id":"ac6aedcd-e048-41bd-a6fd-bfdf600bbad7","entry_id":"1c803a91-219e-4ea0-b6c4-4f01ddba957d","operation":"trash","state":"active","original_path":"$TESTROOT/workspace/composite-hook-target.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/1c803a91-219e-4ea0-b6c4-4f01ddba957d/payload","kind":"file","timestamp":"2026-09-17T03:12:10.896897Z","project":"$TESTROOT/workspace","session_id":"p6-composite-session","reason":"p6 composite deletion","agent":"codex/luna","tool":"pretooluse:claude-bash","extensions":null},"events":[{"schema_version":1,"event_id":"ac6aedcd-e048-41bd-a6fd-bfdf600bbad7","entry_id":"1c803a91-219e-4ea0-b6c4-4f01ddba957d","operation":"trash","state":"active","original_path":"$TESTROOT/workspace/composite-hook-target.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/1c803a91-219e-4ea0-b6c4-4f01ddba957d/payload","kind":"file","timestamp":"2026-09-17T03:12:10.896897Z","project":"$TESTROOT/workspace","session_id":"p6-composite-session","reason":"p6 composite deletion","agent":"codex/luna","tool":"pretooluse:claude-bash","extensions":null}]}],"errors":[]}
+
+== collision-safe restore refusal ==
+exit_code=3
+{"command":"restore","ok":false,"results":[],"errors":[{"code":"destination_exists","message":"restore destination already exists: $TESTROOT/workspace/composite-collision.txt","entry_id":"1c803a91-219e-4ea0-b6c4-4f01ddba957d","path":"$TESTROOT/workspace/composite-collision.txt"}]}
+
+== normal restore ==
+{"command":"restore","ok":true,"results":[{"entry_id":"1c803a91-219e-4ea0-b6c4-4f01ddba957d","state":"restored","original_path":"$TESTROOT/workspace/composite-hook-target.txt","restore_path":"$TESTROOT/workspace/composite-hook-target.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/1c803a91-219e-4ea0-b6c4-4f01ddba957d/payload","kind":"file","project":"$TESTROOT/workspace","session_id":"p6-composite-session","reason":"p6 composite deletion","agent":"codex/luna","tool":"pretooluse:claude-bash","extensions":null}],"errors":[]}
+
+== active candidate ==
+{"command":"add","ok":true,"results":[{"entry_id":"b6ce42ac-18f9-4b5b-8218-f9fdc40d156e","path":"$TESTROOT/workspace/composite-purge-target.txt","original_path":"$TESTROOT/workspace/composite-purge-target.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/b6ce42ac-18f9-4b5b-8218-f9fdc40d156e/payload","kind":"file","state":"active","project":"$CHECKOUT","session_id":null,"reason":"p6 composite purge","agent":null,"tool":"safe-delete-cli","extensions":null}],"errors":[]}
+
+== controlled dry-run ==
+{"command":"purge","ok":true,"results":[{"mode":"dry_run","dry_run":true,"policy":{"source":"older_than","as_of":"2026-09-17T03:12:11.411464Z","cutoff":"2026-09-17T02:12:11.411464Z","cutoff_utc":"2026-09-17T02:12:11.411464Z","threshold_days":0.041666666666666664,"threshold_duration":"1h","threshold_seconds":3600},"candidates":[],"decisions":[{"entry_id":"1c803a91-219e-4ea0-b6c4-4f01ddba957d","state":"restored","original_path":"$TESTROOT/workspace/composite-hook-target.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/1c803a91-219e-4ea0-b6c4-4f01ddba957d/payload","kind":"file","timestamp":"2026-09-17T03:12:10.896897Z","decision":"excluded","reason":"restored","age_anchor":"2026-09-17T03:12:10.896897Z","last_event":{"event_id":"cbd15669-c847-44c0-9dd4-30ab5dc33cca","operation":"restore","timestamp":"2026-09-17T03:12:11.224954Z"}},{"entry_id":"b6ce42ac-18f9-4b5b-8218-f9fdc40d156e","state":"active","original_path":"$TESTROOT/workspace/composite-purge-target.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/b6ce42ac-18f9-4b5b-8218-f9fdc40d156e/payload","kind":"file","timestamp":"2026-09-17T03:12:11.296661Z","decision":"excluded","reason":"too_young","age_anchor":"2026-09-17T03:12:11.296661Z","last_event":{"event_id":"2e86220a-6b84-48d2-b0a0-2f6b2b2fdbc1","operation":"trash","timestamp":"2026-09-17T03:12:11.296661Z"}}],"outcomes":[]}],"errors":[]}
+ledger_sha256_before=f8c1ff705a4836c3a53e7db67726a4fe2ad35ec4002d618635ca4b597b3d8c8f
+ledger_sha256_after=f8c1ff705a4836c3a53e7db67726a4fe2ad35ec4002d618635ca4b597b3d8c8f
+
+== controlled execute cutoff=2026-09-17T03:13:11Z ==
+{"command":"purge","ok":true,"results":[{"mode":"execute","dry_run":false,"policy":{"source":"before","as_of":"2026-09-17T03:12:11.527039Z","cutoff":"2026-09-17T03:13:11Z","cutoff_utc":"2026-09-17T03:13:11Z","threshold_days":null,"threshold_duration":null},"candidates":["b6ce42ac-18f9-4b5b-8218-f9fdc40d156e"],"decisions":[{"entry_id":"1c803a91-219e-4ea0-b6c4-4f01ddba957d","state":"restored","original_path":"$TESTROOT/workspace/composite-hook-target.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/1c803a91-219e-4ea0-b6c4-4f01ddba957d/payload","kind":"file","timestamp":"2026-09-17T03:12:10.896897Z","decision":"excluded","reason":"restored","age_anchor":"2026-09-17T03:12:10.896897Z","last_event":{"event_id":"cbd15669-c847-44c0-9dd4-30ab5dc33cca","operation":"restore","timestamp":"2026-09-17T03:12:11.224954Z"}},{"entry_id":"b6ce42ac-18f9-4b5b-8218-f9fdc40d156e","state":"active","original_path":"$TESTROOT/workspace/composite-purge-target.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/b6ce42ac-18f9-4b5b-8218-f9fdc40d156e/payload","kind":"file","timestamp":"2026-09-17T03:12:11.296661Z","decision":"candidate","reason":"eligible","age_anchor":"2026-09-17T03:12:11.296661Z","last_event":{"event_id":"2e86220a-6b84-48d2-b0a0-2f6b2b2fdbc1","operation":"trash","timestamp":"2026-09-17T03:12:11.296661Z"}}],"outcomes":[{"entry_id":"b6ce42ac-18f9-4b5b-8218-f9fdc40d156e","state":"purged","outcome":"purged","code":"purge_complete","intent_event_id":"829ec97c-149d-4814-ada1-57fc94ecb238","complete_event_id":"7e584ea8-c199-40db-8c39-dfc3490b8408","recovered":false}]}],"errors":[]}
+
+== final lifecycle inspection ==
+{"command":"list","ok":true,"results":[{"entry_id":"1c803a91-219e-4ea0-b6c4-4f01ddba957d","state":"restored","original_path":"$TESTROOT/workspace/composite-hook-target.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/1c803a91-219e-4ea0-b6c4-4f01ddba957d/payload","kind":"file","timestamp":"2026-09-17T03:12:10.896897Z","project":"$TESTROOT/workspace","session_id":"p6-composite-session","reason":"p6 composite deletion","agent":"codex/luna","tool":"pretooluse:claude-bash","extensions":null},{"entry_id":"b6ce42ac-18f9-4b5b-8218-f9fdc40d156e","state":"purged","original_path":"$TESTROOT/workspace/composite-purge-target.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/b6ce42ac-18f9-4b5b-8218-f9fdc40d156e/payload","kind":"file","timestamp":"2026-09-17T03:12:11.296661Z","project":"$CHECKOUT","session_id":null,"reason":"p6 composite purge","agent":null,"tool":"safe-delete-cli","extensions":null}],"errors":[]}
+
+child_call_count=1
+ledger_event_count=5
+raw_fallback_marker=absent
+composite=hook->add->trash/ledger->list/show->collision-safe-restore->purge-dry-run/execute
+utc_end=2026-09-17T03:12:11Z
+replay_marker=CAPTURED

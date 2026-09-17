@@ -1,0 +1,16 @@
+replay_status=CAPTURED
+product_sha=2710abb4e10d1ac473f007e94f00001d267a77ea
+evidence_sha=f5b0fd601dcbe7bb5ae28b7e79f1c8a6d7ccb25f
+cwd=$CHECKOUT
+utc_start=2026-09-17T03:12:34Z
+command=python3 -m unittest -v tests.test_cli_contract.CliContractTests.test_ledger_append_failure_rolls_back_without_raw_delete tests.test_cli_contract.CliContractTests.test_audit_failure_blocks_add_and_restore
+test_ledger_append_failure_rolls_back_without_raw_delete (tests.test_cli_contract.CliContractTests.test_ledger_append_failure_rolls_back_without_raw_delete) ... ok
+test_audit_failure_blocks_add_and_restore (tests.test_cli_contract.CliContractTests.test_audit_failure_blocks_add_and_restore) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.298s
+
+OK
+exit_code=0
+utc_end=2026-09-17T03:12:35Z
+replay_marker=CAPTURED
