@@ -13,6 +13,8 @@ PROJECT="$P6_WORKSPACE/project"
 FILE="$P6_WORKSPACE/metadata.txt"
 NO_CONTEXT="$P6_WORKSPACE/no-context.txt"
 EXTENSIONS='{"nested":{"source":"p6-scaffold","values":["one",2,true]}}'
+NO_CONTEXT_CWD="${P6_NO_CONTEXT_CWD:-/var}"
+[[ -d "$NO_CONTEXT_CWD" ]]
 mkdir -p -- "$PROJECT"
 printf 'rich metadata fixture\n' >"$FILE"
 printf 'no context fixture\n' >"$NO_CONTEXT"
@@ -64,7 +66,9 @@ p6_assert_ok "$filtered_json"
 printf '\n== absent context does not fabricate identity ==\n'
 set +u
 absent_json="$(
-    cd -- "$P6_WORKSPACE"
+    # Invoke outside the checkout and its /tmp test-parent so project detection
+    # has no supported repository root to discover.
+    cd -- "$NO_CONTEXT_CWD"
     env -u SAFE_DELETE_PROJECT -u SAFE_DELETE_SESSION_ID -u SAFE_DELETE_AGENT \
         "$CHECKOUT/safe-delete" --root "$SAFE_DELETE_ROOT" --json add -- "$NO_CONTEXT"
 )"
