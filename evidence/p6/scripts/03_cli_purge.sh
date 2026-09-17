@@ -87,4 +87,4 @@ list_json="$(p6_cli list --all)"
 printf '%s\n' "$list_json"
 p6_assert_ok "$list_json"
 
-printf '\nreplay_marker=PENDING_CAPTURE (local scaffold sanity path; not EVIDENCE READY)\n'
+p6_finish_replay

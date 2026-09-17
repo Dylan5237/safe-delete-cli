@@ -94,4 +94,4 @@ if set(entries) != expected or any(item["state"] != "restored" for item in entri
     raise SystemExit(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 PY
 
-printf '\nreplay_marker=PENDING_CAPTURE (local scaffold sanity path; not EVIDENCE READY)\n'
+p6_finish_replay

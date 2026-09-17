@@ -87,4 +87,4 @@ if result.get("tool") != "safe-delete-cli":
     raise SystemExit(json.dumps(result, ensure_ascii=False, sort_keys=True))
 PY
 
-printf '\nreplay_marker=PENDING_CAPTURE (local scaffold sanity path; not EVIDENCE READY)\n'
+p6_finish_replay

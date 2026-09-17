@@ -24,10 +24,17 @@ export TESTROOT
 
 SAFE_DELETE_ROOT="${SAFE_DELETE_ROOT:-$TESTROOT/safe-delete-root}"
 P6_WORKSPACE="${P6_WORKSPACE:-$TESTROOT/workspace}"
+P6_HOME="${P6_HOME:-$TESTROOT/home}"
+P6_XDG_DATA_HOME="${P6_XDG_DATA_HOME:-$TESTROOT/xdg-data}"
+P6_XDG_CONFIG_HOME="${P6_XDG_CONFIG_HOME:-$TESTROOT/xdg-config}"
 mkdir -p -- "$P6_WORKSPACE"
-export SAFE_DELETE_ROOT P6_WORKSPACE
+mkdir -p -- "$P6_HOME" "$P6_XDG_DATA_HOME" "$P6_XDG_CONFIG_HOME"
+export SAFE_DELETE_ROOT P6_WORKSPACE P6_HOME P6_XDG_DATA_HOME P6_XDG_CONFIG_HOME
+export HOME="$P6_HOME" XDG_DATA_HOME="$P6_XDG_DATA_HOME" XDG_CONFIG_HOME="$P6_XDG_CONFIG_HOME"
 
-export P6_SHA="$(git -C "$CHECKOUT" rev-parse HEAD)"
+export P6_EVIDENCE_SHA="$(git -C "$CHECKOUT" rev-parse HEAD)"
+export P6_PRODUCT_SHA="${P6_PRODUCT_SHA:-$(git -C "$CHECKOUT" merge-base HEAD origin/main 2>/dev/null || git -C "$CHECKOUT" rev-parse HEAD)}"
+export P6_SHA="$P6_PRODUCT_SHA"
 export P6_UTC_START="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
 p6_enter_checkout() {
@@ -47,17 +54,69 @@ p6_record_env() {
     local status
     status="$(git -C "$CHECKOUT" status --porcelain --untracked-files=all)"
     printf '%s\n' \
-        'scaffold_status=PENDING_CAPTURE' \
+        'replay_status=CAPTURED' \
         "checkout=\$CHECKOUT ($CHECKOUT)" \
         "testroot=\$TESTROOT ($TESTROOT)" \
         "safe_delete_root=\$SAFE_DELETE_ROOT ($SAFE_DELETE_ROOT)" \
         "workspace=\$P6_WORKSPACE ($P6_WORKSPACE)" \
-        "sha=$P6_SHA" \
+        "home=\$P6_HOME ($P6_HOME)" \
+        "xdg_data_home=\$P6_XDG_DATA_HOME ($P6_XDG_DATA_HOME)" \
+        "xdg_config_home=\$P6_XDG_CONFIG_HOME ($P6_XDG_CONFIG_HOME)" \
+        "product_sha=$P6_PRODUCT_SHA" \
+        "evidence_sha=$P6_EVIDENCE_SHA" \
         "cwd=$(pwd -P)" \
         "utc_start=$P6_UTC_START" \
         "python=$(python3 --version 2>&1)" \
         "os=$(uname -srm)" \
         "git_status=$([[ -z "$status" ]] && printf clean || printf dirty)"
+}
+
+p6_finish_replay() {
+    export P6_UTC_END="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf 'utc_end=%s\n' "$P6_UTC_END"
+    printf 'replay_marker=CAPTURED\n'
+}
+
+p6_write_instrumented_cli() {
+    local wrapper="$1"
+    local calls="$2"
+    python3 - "$wrapper" "$calls" "$CHECKOUT/safe-delete" <<'PY'
+import shlex
+import sys
+from pathlib import Path
+
+wrapper, calls, cli = sys.argv[1:]
+Path(wrapper).write_text(
+    "#!/bin/sh\n"
+    f"printf '%s\\n' \"$*\" >> {shlex.quote(calls)}\n"
+    f"exec {shlex.quote(cli)} \"$@\"\n",
+    encoding="utf-8",
+)
+Path(wrapper).chmod(0o700)
+PY
+}
+
+p6_write_raw_sentinels() {
+    local directory="$1"
+    local marker="$2"
+    python3 - "$directory" "$marker" <<'PY'
+import shlex
+import sys
+from pathlib import Path
+
+directory, marker = sys.argv[1:]
+root = Path(directory)
+root.mkdir(parents=True, exist_ok=True)
+for command in ("rm", "unlink", "rmdir"):
+    path = root / command
+    path.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' {command} >> {shlex.quote(marker)}\n"
+        "exit 97\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o700)
+PY
 }
 
 p6_cli() {
