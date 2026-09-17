@@ -1,0 +1,56 @@
+replay_status=CAPTURED
+checkout=$CHECKOUT ($CHECKOUT)
+testroot=$TESTROOT ($TESTROOT)
+safe_delete_root=$SAFE_DELETE_ROOT ($TESTROOT/safe-delete-root)
+workspace=$P6_WORKSPACE ($TESTROOT/workspace)
+home=$P6_HOME ($TESTROOT/home)
+xdg_data_home=$P6_XDG_DATA_HOME ($TESTROOT/xdg-data)
+xdg_config_home=$P6_XDG_CONFIG_HOME ($TESTROOT/xdg-config)
+product_sha=2710abb4e10d1ac473f007e94f00001d267a77ea
+evidence_sha=f5b0fd601dcbe7bb5ae28b7e79f1c8a6d7ccb25f
+cwd=$CHECKOUT
+utc_start=2026-09-17T03:12:05Z
+python=Python 3.13.5
+os=Linux 6.12.94+ x86_64
+git_status=clean
+
+== init ==
+{"command":"init","ok":true,"results":[{"root":"$TESTROOT/safe-delete-root","ledger_path":"$TESTROOT/safe-delete-root/ledger.jsonl","lock_path":"$TESTROOT/safe-delete-root/locks/ledger.lock","trash_path":"$TESTROOT/safe-delete-root/trash","objects_path":"$TESTROOT/safe-delete-root/trash/objects"}],"errors":[]}
+
+== install real PATH shims ==
+{"command":"hook install","ok":true,"results":[{"selector":"path-shim","mode":"path-shim","enabled":true,"installed":true,"registry_valid":true,"enforced":false,"cli_path":"$TESTROOT/instrumented-safe-delete","package":{"version":"v1","files":{"rm":true,"rmdir":true,"unlink":true},"complete":true,"path_precedence":false},"boundary":{"shim_dir":"$TESTROOT/xdg-data/safe-delete/bin","prepend_path":"$TESTROOT/xdg-data/safe-delete/bin","path_precedence":false},"storage":{"root":"$TESTROOT/safe-delete-root","ledger":"$TESTROOT/safe-delete-root/ledger.jsonl","usable":true},"out_of_coverage":["Python/Go/Node filesystem APIs","find -delete","git clean","busybox rm","absolute /bin/rm, /bin/unlink, or /bin/rmdir","another unconfigured agent/tool","a container or namespace without the hook","a privileged or human process","PATH reordering","disabled or uninstalled integration"],"warning":"integration is installed but enforcement is not proven at this boundary","changed":true,"config_created":false,"path_activation":"prepend $TESTROOT/xdg-data/safe-delete/bin to PATH"}],"errors":[]}
+
+== status with shim first on PATH ==
+{"command":"hook status","ok":true,"results":[{"selector":"path-shim","mode":"path-shim","enabled":true,"installed":true,"registry_valid":true,"enforced":true,"cli_path":"$TESTROOT/instrumented-safe-delete","package":{"version":"v1","files":{"rm":true,"rmdir":true,"unlink":true},"complete":true,"path_precedence":true},"boundary":{"shim_dir":"$TESTROOT/xdg-data/safe-delete/bin","prepend_path":"$TESTROOT/xdg-data/safe-delete/bin","path_precedence":true},"storage":{"root":"$TESTROOT/safe-delete-root","ledger":"$TESTROOT/safe-delete-root/ledger.jsonl","usable":true},"out_of_coverage":["Python/Go/Node filesystem APIs","find -delete","git clean","busybox rm","absolute /bin/rm, /bin/unlink, or /bin/rmdir","another unconfigured agent/tool","a container or namespace without the hook","a privileged or human process","PATH reordering","disabled or uninstalled integration"]}],"errors":[]}
+
+== PATH shim rm ==
+resolved=$TESTROOT/xdg-data/safe-delete/bin/rm
+argv=-R -f -- $TESTROOT/workspace/path-rm.txt
+exit_code=0
+stdout={"agent": "codex/luna", "entry_id": "84340c5d-bc79-4000-8ad2-a9da2c9ce596", "extensions": null, "kind": "file", "original_path": "$TESTROOT/workspace/path-rm.txt", "path": "$TESTROOT/workspace/path-rm.txt", "project": "$TESTROOT/workspace", "reason": null, "session_id": "p6-path-session", "state": "active", "tool": "path-shim:rm", "trashed_path": "$TESTROOT/safe-delete-root/trash/objects/84340c5d-bc79-4000-8ad2-a9da2c9ce596/payload"}
+stderr=
+
+== PATH shim unlink ==
+resolved=$TESTROOT/xdg-data/safe-delete/bin/unlink
+argv=-- $TESTROOT/workspace/path-unlink.txt
+exit_code=0
+stdout={"agent": "codex/luna", "entry_id": "28214d97-5cfc-4b81-9592-6f101adfd266", "extensions": null, "kind": "file", "original_path": "$TESTROOT/workspace/path-unlink.txt", "path": "$TESTROOT/workspace/path-unlink.txt", "project": "$TESTROOT/workspace", "reason": null, "session_id": "p6-path-session", "state": "active", "tool": "path-shim:unlink", "trashed_path": "$TESTROOT/safe-delete-root/trash/objects/28214d97-5cfc-4b81-9592-6f101adfd266/payload"}
+stderr=
+
+== PATH shim rmdir ==
+resolved=$TESTROOT/xdg-data/safe-delete/bin/rmdir
+argv=-- $TESTROOT/workspace/path-rmdir
+exit_code=0
+stdout={"agent": "codex/luna", "entry_id": "61d12e3d-1e33-4108-abb1-ade5701334c6", "extensions": null, "kind": "directory", "original_path": "$TESTROOT/workspace/path-rmdir", "path": "$TESTROOT/workspace/path-rmdir", "project": "$TESTROOT/workspace", "reason": null, "session_id": "p6-path-session", "state": "active", "tool": "path-shim:rmdir", "trashed_path": "$TESTROOT/safe-delete-root/trash/objects/61d12e3d-1e33-4108-abb1-ade5701334c6/payload"}
+stderr=
+
+child_call_count=3
+ledger_event_count=3
+raw_fallback_marker=absent
+child_calls:
+add --project $TESTROOT/workspace --session-id p6-path-session --agent codex/luna --tool path-shim:rm -- $TESTROOT/workspace/path-rm.txt
+add --project $TESTROOT/workspace --session-id p6-path-session --agent codex/luna --tool path-shim:unlink -- $TESTROOT/workspace/path-unlink.txt
+add --project $TESTROOT/workspace --session-id p6-path-session --agent codex/luna --tool path-shim:rmdir -- $TESTROOT/workspace/path-rmdir
+raw_deletion_not_executed=true
+utc_end=2026-09-17T03:12:07Z
+replay_marker=CAPTURED

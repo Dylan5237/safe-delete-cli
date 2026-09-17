@@ -1,0 +1,62 @@
+replay_status=CAPTURED
+checkout=$CHECKOUT ($CHECKOUT)
+testroot=$TESTROOT ($TESTROOT)
+safe_delete_root=$SAFE_DELETE_ROOT ($TESTROOT/safe-delete-root)
+workspace=$P6_WORKSPACE ($TESTROOT/workspace)
+home=$P6_HOME ($TESTROOT/home)
+xdg_data_home=$P6_XDG_DATA_HOME ($TESTROOT/xdg-data)
+xdg_config_home=$P6_XDG_CONFIG_HOME ($TESTROOT/xdg-config)
+product_sha=2710abb4e10d1ac473f007e94f00001d267a77ea
+evidence_sha=f5b0fd601dcbe7bb5ae28b7e79f1c8a6d7ccb25f
+cwd=$CHECKOUT
+utc_start=2026-09-17T03:12:07Z
+python=Python 3.13.5
+os=Linux 6.12.94+ x86_64
+git_status=clean
+
+== lifecycle setup ==
+{"command":"init","ok":true,"results":[{"root":"$TESTROOT/safe-delete-root","ledger_path":"$TESTROOT/safe-delete-root/ledger.jsonl","lock_path":"$TESTROOT/safe-delete-root/locks/ledger.lock","trash_path":"$TESTROOT/safe-delete-root/trash","objects_path":"$TESTROOT/safe-delete-root/trash/objects"}],"errors":[]}
+
+== install ==
+{"command":"hook install","ok":true,"results":[{"selector":"claude","mode":"pretooluse","enabled":true,"installed":true,"registry_valid":true,"enforced":true,"cli_path":"$TESTROOT/instrumented-safe-delete","package":{"version":"v1","adapter_path":"$TESTROOT/xdg-data/safe-delete/hooks/v1/pretooluse","adapter_runnable":true},"boundary":{"config_path":"$TESTROOT/claude-settings.json","registered":true},"storage":{"root":"$TESTROOT/safe-delete-root","ledger":"$TESTROOT/safe-delete-root/ledger.jsonl","usable":true},"out_of_coverage":["Python/Go/Node filesystem APIs","find -delete","git clean","busybox rm","absolute /bin/rm, /bin/unlink, or /bin/rmdir","another unconfigured agent/tool","a container or namespace without the hook","a privileged or human process","PATH reordering","disabled or uninstalled integration"],"changed":true,"config_created":true,"path_activation":null}],"errors":[]}
+== repeat install ==
+{"command":"hook install","ok":true,"results":[{"selector":"claude","mode":"pretooluse","enabled":true,"installed":true,"registry_valid":true,"enforced":true,"cli_path":"$TESTROOT/instrumented-safe-delete","package":{"version":"v1","adapter_path":"$TESTROOT/xdg-data/safe-delete/hooks/v1/pretooluse","adapter_runnable":true},"boundary":{"config_path":"$TESTROOT/claude-settings.json","registered":true},"storage":{"root":"$TESTROOT/safe-delete-root","ledger":"$TESTROOT/safe-delete-root/ledger.jsonl","usable":true},"out_of_coverage":["Python/Go/Node filesystem APIs","find -delete","git clean","busybox rm","absolute /bin/rm, /bin/unlink, or /bin/rmdir","another unconfigured agent/tool","a container or namespace without the hook","a privileged or human process","PATH reordering","disabled or uninstalled integration"],"changed":false,"config_created":false,"path_activation":null}],"errors":[]}
+
+== installed status ==
+{"command":"hook status","ok":true,"results":[{"selector":"claude","mode":"pretooluse","enabled":true,"installed":true,"registry_valid":true,"enforced":true,"cli_path":"$TESTROOT/instrumented-safe-delete","package":{"version":"v1","adapter_path":"$TESTROOT/xdg-data/safe-delete/hooks/v1/pretooluse","adapter_runnable":true},"boundary":{"config_path":"$TESTROOT/claude-settings.json","registered":true},"storage":{"root":"$TESTROOT/safe-delete-root","ledger":"$TESTROOT/safe-delete-root/ledger.jsonl","usable":true},"out_of_coverage":["Python/Go/Node filesystem APIs","find -delete","git clean","busybox rm","absolute /bin/rm, /bin/unlink, or /bin/rmdir","another unconfigured agent/tool","a container or namespace without the hook","a privileged or human process","PATH reordering","disabled or uninstalled integration"]}],"errors":[]}
+
+== disable ==
+{"command":"hook disable","ok":true,"results":[{"selector":"claude","mode":"pretooluse","enabled":false,"installed":true,"registry_valid":true,"enforced":false,"cli_path":"$TESTROOT/instrumented-safe-delete","package":{"version":"v1","adapter_path":"$TESTROOT/xdg-data/safe-delete/hooks/v1/pretooluse","adapter_runnable":true},"boundary":{"config_path":"$TESTROOT/claude-settings.json","registered":false},"storage":{"root":"$TESTROOT/safe-delete-root","ledger":"$TESTROOT/safe-delete-root/ledger.jsonl","usable":true},"out_of_coverage":["Python/Go/Node filesystem APIs","find -delete","git clean","busybox rm","absolute /bin/rm, /bin/unlink, or /bin/rmdir","another unconfigured agent/tool","a container or namespace without the hook","a privileged or human process","PATH reordering","disabled or uninstalled integration"],"warning":"raw deletion is outside the configured boundary while this integration is disabled","changed":true,"raw_delete_outside_boundary":true}],"errors":[]}
+== repeat disable ==
+{"command":"hook disable","ok":true,"results":[{"selector":"claude","mode":"pretooluse","enabled":false,"installed":true,"registry_valid":true,"enforced":false,"cli_path":"$TESTROOT/instrumented-safe-delete","package":{"version":"v1","adapter_path":"$TESTROOT/xdg-data/safe-delete/hooks/v1/pretooluse","adapter_runnable":true},"boundary":{"config_path":"$TESTROOT/claude-settings.json","registered":false},"storage":{"root":"$TESTROOT/safe-delete-root","ledger":"$TESTROOT/safe-delete-root/ledger.jsonl","usable":true},"out_of_coverage":["Python/Go/Node filesystem APIs","find -delete","git clean","busybox rm","absolute /bin/rm, /bin/unlink, or /bin/rmdir","another unconfigured agent/tool","a container or namespace without the hook","a privileged or human process","PATH reordering","disabled or uninstalled integration"],"warning":"raw deletion is outside the configured boundary while this integration is disabled","changed":false,"raw_delete_outside_boundary":true}],"errors":[]}
+== disabled status ==
+{"command":"hook status","ok":true,"results":[{"selector":"claude","mode":"pretooluse","enabled":false,"installed":true,"registry_valid":true,"enforced":false,"cli_path":"$TESTROOT/instrumented-safe-delete","package":{"version":"v1","adapter_path":"$TESTROOT/xdg-data/safe-delete/hooks/v1/pretooluse","adapter_runnable":true},"boundary":{"config_path":"$TESTROOT/claude-settings.json","registered":false},"storage":{"root":"$TESTROOT/safe-delete-root","ledger":"$TESTROOT/safe-delete-root/ledger.jsonl","usable":true},"out_of_coverage":["Python/Go/Node filesystem APIs","find -delete","git clean","busybox rm","absolute /bin/rm, /bin/unlink, or /bin/rmdir","another unconfigured agent/tool","a container or namespace without the hook","a privileged or human process","PATH reordering","disabled or uninstalled integration"],"warning":"raw deletion is outside the configured boundary while this integration is disabled"}],"errors":[]}
+
+== uninstall ==
+{"command":"hook uninstall","ok":true,"results":[{"selector":"claude","mode":"pretooluse","enabled":false,"installed":false,"registry_valid":false,"enforced":false,"cli_path":"$CHECKOUT/safe-delete","package":{"version":"v1","adapter_path":"$TESTROOT/xdg-data/safe-delete/hooks/v1/pretooluse","adapter_runnable":false},"boundary":{"config_path":"$TESTROOT/claude-settings.json","registered":false},"storage":{"root":"$TESTROOT/safe-delete-root","ledger":"$TESTROOT/safe-delete-root/ledger.jsonl","usable":true},"out_of_coverage":["Python/Go/Node filesystem APIs","find -delete","git clean","busybox rm","absolute /bin/rm, /bin/unlink, or /bin/rmdir","another unconfigured agent/tool","a container or namespace without the hook","a privileged or human process","PATH reordering","disabled or uninstalled integration"],"warning":"raw deletion is outside the configured boundary while this integration is disabled","changed":true,"raw_delete_outside_boundary":true}],"errors":[]}
+== repeat uninstall ==
+{"command":"hook uninstall","ok":true,"results":[{"selector":"claude","mode":"pretooluse","enabled":false,"installed":false,"registry_valid":false,"enforced":false,"cli_path":"$CHECKOUT/safe-delete","package":{"version":"v1","adapter_path":"$TESTROOT/xdg-data/safe-delete/hooks/v1/pretooluse","adapter_runnable":false},"boundary":{"config_path":"$TESTROOT/home/.claude/settings.json","registered":false},"storage":{"root":"$TESTROOT/safe-delete-root","ledger":"$TESTROOT/safe-delete-root/ledger.jsonl","usable":true},"out_of_coverage":["Python/Go/Node filesystem APIs","find -delete","git clean","busybox rm","absolute /bin/rm, /bin/unlink, or /bin/rmdir","another unconfigured agent/tool","a container or namespace without the hook","a privileged or human process","PATH reordering","disabled or uninstalled integration"],"warning":"raw deletion is outside the configured boundary while this integration is disabled","changed":false,"raw_delete_outside_boundary":true}],"errors":[]}
+ledger_sha256_before=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+ledger_sha256_after=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+runtime_ledger_unchanged=true
+
+== focused fail-closed and pass-through tests ==
+python3 -m unittest -v tests.test_hook_enforcement.HookEnforcementTests.test_nonzero_cli_is_denied_and_has_no_raw_fallback tests.test_hook_enforcement.HookEnforcementTests.test_installed_route_propagates_real_cli_failure_without_raw_fallback tests.test_hook_enforcement.HookEnforcementTests.test_cross_device_cli_error_is_propagated_without_raw_fallback tests.test_hook_enforcement.HookEnforcementTests.test_unavailable_cli_and_storage_fail_closed_before_child tests.test_hook_enforcement.HookEnforcementTests.test_unregistered_or_disabled_integration_denies_raw_route tests.test_hook_enforcement.HookEnforcementTests.test_malformed_required_context_denies_with_echo_when_possible tests.test_hook_enforcement.HookEnforcementTests.test_unsupported_or_ambiguous_vectors_deny tests.test_hook_enforcement.HookEnforcementTests.test_probes_and_already_safe_delete_pass_through tests.test_hook_enforcement.HookEnforcementTests.test_direct_safe_delete_add_is_passed_through_once tests.test_hook_enforcement.HookEnforcementTests.test_decide_denies_missing_non_directory_and_inaccessible_cwd tests.test_hook_enforcement.HookEnforcementTests.test_unwritable_ledger_fails_closed_without_child
+test_nonzero_cli_is_denied_and_has_no_raw_fallback (tests.test_hook_enforcement.HookEnforcementTests.test_nonzero_cli_is_denied_and_has_no_raw_fallback) ... ok
+test_installed_route_propagates_real_cli_failure_without_raw_fallback (tests.test_hook_enforcement.HookEnforcementTests.test_installed_route_propagates_real_cli_failure_without_raw_fallback) ... ok
+test_cross_device_cli_error_is_propagated_without_raw_fallback (tests.test_hook_enforcement.HookEnforcementTests.test_cross_device_cli_error_is_propagated_without_raw_fallback) ... ok
+test_unavailable_cli_and_storage_fail_closed_before_child (tests.test_hook_enforcement.HookEnforcementTests.test_unavailable_cli_and_storage_fail_closed_before_child) ... ok
+test_unregistered_or_disabled_integration_denies_raw_route (tests.test_hook_enforcement.HookEnforcementTests.test_unregistered_or_disabled_integration_denies_raw_route) ... ok
+test_malformed_required_context_denies_with_echo_when_possible (tests.test_hook_enforcement.HookEnforcementTests.test_malformed_required_context_denies_with_echo_when_possible) ... ok
+test_unsupported_or_ambiguous_vectors_deny (tests.test_hook_enforcement.HookEnforcementTests.test_unsupported_or_ambiguous_vectors_deny) ... ok
+test_probes_and_already_safe_delete_pass_through (tests.test_hook_enforcement.HookEnforcementTests.test_probes_and_already_safe_delete_pass_through) ... ok
+test_direct_safe_delete_add_is_passed_through_once (tests.test_hook_enforcement.HookEnforcementTests.test_direct_safe_delete_add_is_passed_through_once) ... ok
+test_decide_denies_missing_non_directory_and_inaccessible_cwd (tests.test_hook_enforcement.HookEnforcementTests.test_decide_denies_missing_non_directory_and_inaccessible_cwd) ... ok
+test_unwritable_ledger_fails_closed_without_child (tests.test_hook_enforcement.HookEnforcementTests.test_unwritable_ledger_fails_closed_without_child) ... ok
+
+----------------------------------------------------------------------
+Ran 11 tests in 1.473s
+
+OK
+utc_end=2026-09-17T03:12:09Z
+replay_marker=CAPTURED

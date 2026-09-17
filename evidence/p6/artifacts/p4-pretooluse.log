@@ -1,0 +1,50 @@
+replay_status=CAPTURED
+checkout=$CHECKOUT ($CHECKOUT)
+testroot=$TESTROOT ($TESTROOT)
+safe_delete_root=$SAFE_DELETE_ROOT ($TESTROOT/safe-delete-root)
+workspace=$P6_WORKSPACE ($TESTROOT/workspace)
+home=$P6_HOME ($TESTROOT/home)
+xdg_data_home=$P6_XDG_DATA_HOME ($TESTROOT/xdg-data)
+xdg_config_home=$P6_XDG_CONFIG_HOME ($TESTROOT/xdg-config)
+product_sha=2710abb4e10d1ac473f007e94f00001d267a77ea
+evidence_sha=f5b0fd601dcbe7bb5ae28b7e79f1c8a6d7ccb25f
+cwd=$CHECKOUT
+utc_start=2026-09-17T03:12:04Z
+python=Python 3.13.5
+os=Linux 6.12.94+ x86_64
+git_status=clean
+
+== init ==
+{"command":"init","ok":true,"results":[{"root":"$TESTROOT/safe-delete-root","ledger_path":"$TESTROOT/safe-delete-root/ledger.jsonl","lock_path":"$TESTROOT/safe-delete-root/locks/ledger.lock","trash_path":"$TESTROOT/safe-delete-root/trash","objects_path":"$TESTROOT/safe-delete-root/trash/objects"}],"errors":[]}
+
+== install real PreToolUse adapter into disposable config ==
+{"command":"hook install","ok":true,"results":[{"selector":"claude","mode":"pretooluse","enabled":true,"installed":true,"registry_valid":true,"enforced":true,"cli_path":"$TESTROOT/instrumented-safe-delete","package":{"version":"v1","adapter_path":"$TESTROOT/xdg-data/safe-delete/hooks/v1/pretooluse","adapter_runnable":true},"boundary":{"config_path":"$TESTROOT/claude-settings.json","registered":true},"storage":{"root":"$TESTROOT/safe-delete-root","ledger":"$TESTROOT/safe-delete-root/ledger.jsonl","usable":true},"out_of_coverage":["Python/Go/Node filesystem APIs","find -delete","git clean","busybox rm","absolute /bin/rm, /bin/unlink, or /bin/rmdir","another unconfigured agent/tool","a container or namespace without the hook","a privileged or human process","PATH reordering","disabled or uninstalled integration"],"changed":true,"config_created":true,"path_activation":null}],"errors":[]}
+
+== PreToolUse rm ==
+request={"protocol_version":1,"request_id":"p6-pretooluse-rm","tool":"claude-bash","argv":["rm","-rf","--","$TESTROOT/workspace/pretooluse-file.txt"],"cwd":"$TESTROOT/workspace","project":"$TESTROOT/workspace","session_id":"p6-pretool-session","agent":"codex/luna","reason":"p6 hook replay","extensions":{"evidence":{"phase":6,"route":"pretooluse"}}}
+exit_code=0
+adapter_stdout={"protocol_version":1,"request_id":"p6-pretooluse-rm","decision":"route","reason_code":"raw_delete","safe_delete_argv":["safe-delete","add","--project","$TESTROOT/workspace","--session-id","p6-pretool-session","--agent","codex/luna","--reason","p6 hook replay","--extensions","{\"evidence\":{\"phase\":6,\"route\":\"pretooluse\"}}","--tool","pretooluse:claude-bash","--","$TESTROOT/workspace/pretooluse-file.txt"]}
+adapter_stderr={"agent": "codex/luna", "entry_id": "e6dab31f-6f2d-4408-81b6-c2e0be4a530c", "extensions": {"evidence": {"phase": 6, "route": "pretooluse"}}, "kind": "file", "original_path": "$TESTROOT/workspace/pretooluse-file.txt", "path": "$TESTROOT/workspace/pretooluse-file.txt", "project": "$TESTROOT/workspace", "reason": "p6 hook replay", "session_id": "p6-pretool-session", "state": "active", "tool": "pretooluse:claude-bash", "trashed_path": "$TESTROOT/safe-delete-root/trash/objects/e6dab31f-6f2d-4408-81b6-c2e0be4a530c/payload"}
+
+== PreToolUse unlink ==
+request={"protocol_version":1,"request_id":"p6-pretooluse-unlink","tool":"claude-bash","argv":["unlink","--","$TESTROOT/workspace/pretooluse-unlink.txt"],"cwd":"$TESTROOT/workspace","project":"$TESTROOT/workspace","session_id":"p6-pretool-session","agent":"codex/luna","reason":"p6 hook replay","extensions":{"evidence":{"phase":6,"route":"pretooluse"}}}
+exit_code=0
+adapter_stdout={"protocol_version":1,"request_id":"p6-pretooluse-unlink","decision":"route","reason_code":"raw_delete","safe_delete_argv":["safe-delete","add","--project","$TESTROOT/workspace","--session-id","p6-pretool-session","--agent","codex/luna","--reason","p6 hook replay","--extensions","{\"evidence\":{\"phase\":6,\"route\":\"pretooluse\"}}","--tool","pretooluse:claude-bash","--","$TESTROOT/workspace/pretooluse-unlink.txt"]}
+adapter_stderr={"agent": "codex/luna", "entry_id": "a314949f-aa3e-4248-876f-6694d276de24", "extensions": {"evidence": {"phase": 6, "route": "pretooluse"}}, "kind": "file", "original_path": "$TESTROOT/workspace/pretooluse-unlink.txt", "path": "$TESTROOT/workspace/pretooluse-unlink.txt", "project": "$TESTROOT/workspace", "reason": "p6 hook replay", "session_id": "p6-pretool-session", "state": "active", "tool": "pretooluse:claude-bash", "trashed_path": "$TESTROOT/safe-delete-root/trash/objects/a314949f-aa3e-4248-876f-6694d276de24/payload"}
+
+== PreToolUse rmdir ==
+request={"protocol_version":1,"request_id":"p6-pretooluse-rmdir","tool":"claude-bash","argv":["rmdir","--","$TESTROOT/workspace/pretooluse-directory"],"cwd":"$TESTROOT/workspace","project":"$TESTROOT/workspace","session_id":"p6-pretool-session","agent":"codex/luna","reason":"p6 hook replay","extensions":{"evidence":{"phase":6,"route":"pretooluse"}}}
+exit_code=0
+adapter_stdout={"protocol_version":1,"request_id":"p6-pretooluse-rmdir","decision":"route","reason_code":"raw_delete","safe_delete_argv":["safe-delete","add","--project","$TESTROOT/workspace","--session-id","p6-pretool-session","--agent","codex/luna","--reason","p6 hook replay","--extensions","{\"evidence\":{\"phase\":6,\"route\":\"pretooluse\"}}","--tool","pretooluse:claude-bash","--","$TESTROOT/workspace/pretooluse-directory"]}
+adapter_stderr={"agent": "codex/luna", "entry_id": "2a6a017c-567e-4d61-a649-d8f7c83b8bac", "extensions": {"evidence": {"phase": 6, "route": "pretooluse"}}, "kind": "directory", "original_path": "$TESTROOT/workspace/pretooluse-directory", "path": "$TESTROOT/workspace/pretooluse-directory", "project": "$TESTROOT/workspace", "reason": "p6 hook replay", "session_id": "p6-pretool-session", "state": "active", "tool": "pretooluse:claude-bash", "trashed_path": "$TESTROOT/safe-delete-root/trash/objects/2a6a017c-567e-4d61-a649-d8f7c83b8bac/payload"}
+
+child_call_count=3
+ledger_event_count=3
+raw_fallback_marker=absent
+child_calls:
+add --project $TESTROOT/workspace --session-id p6-pretool-session --agent codex/luna --reason p6 hook replay --extensions {"evidence":{"phase":6,"route":"pretooluse"}} --tool pretooluse:claude-bash -- $TESTROOT/workspace/pretooluse-file.txt
+add --project $TESTROOT/workspace --session-id p6-pretool-session --agent codex/luna --reason p6 hook replay --extensions {"evidence":{"phase":6,"route":"pretooluse"}} --tool pretooluse:claude-bash -- $TESTROOT/workspace/pretooluse-unlink.txt
+add --project $TESTROOT/workspace --session-id p6-pretool-session --agent codex/luna --reason p6 hook replay --extensions {"evidence":{"phase":6,"route":"pretooluse"}} --tool pretooluse:claude-bash -- $TESTROOT/workspace/pretooluse-directory
+raw_deletion_not_executed=true
+utc_end=2026-09-17T03:12:05Z
+replay_marker=CAPTURED

@@ -1,0 +1,18 @@
+replay_status=CAPTURED
+product_sha=2710abb4e10d1ac473f007e94f00001d267a77ea
+evidence_sha=f5b0fd601dcbe7bb5ae28b7e79f1c8a6d7ccb25f
+cwd=$CHECKOUT
+utc_start=2026-09-17T03:12:35Z
+command=python3 -m unittest -v tests.test_cli_contract.CliContractTests.test_p3_context_absence_does_not_fabricate_identity tests.test_cli_contract.CliContractTests.test_p3_flags_override_hook_and_environment_fixtures tests.test_cli_contract.CliContractTests.test_p3_invalid_metadata_is_rejected_before_move_or_append tests.test_cli_contract.CliContractTests.test_p3_legacy_fixture_projects_null_without_rewriting_and_restores
+test_p3_context_absence_does_not_fabricate_identity (tests.test_cli_contract.CliContractTests.test_p3_context_absence_does_not_fabricate_identity) ... ok
+test_p3_flags_override_hook_and_environment_fixtures (tests.test_cli_contract.CliContractTests.test_p3_flags_override_hook_and_environment_fixtures) ... ok
+test_p3_invalid_metadata_is_rejected_before_move_or_append (tests.test_cli_contract.CliContractTests.test_p3_invalid_metadata_is_rejected_before_move_or_append) ... ok
+test_p3_legacy_fixture_projects_null_without_rewriting_and_restores (tests.test_cli_contract.CliContractTests.test_p3_legacy_fixture_projects_null_without_rewriting_and_restores) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.913s
+
+OK
+exit_code=0
+utc_end=2026-09-17T03:12:36Z
+replay_marker=CAPTURED

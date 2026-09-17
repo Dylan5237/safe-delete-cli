@@ -1,0 +1,30 @@
+replay_status=CAPTURED
+checkout=$CHECKOUT ($CHECKOUT)
+testroot=$TESTROOT ($TESTROOT)
+safe_delete_root=$SAFE_DELETE_ROOT ($TESTROOT/safe-delete-root)
+workspace=$P6_WORKSPACE ($TESTROOT/workspace)
+home=$P6_HOME ($TESTROOT/home)
+xdg_data_home=$P6_XDG_DATA_HOME ($TESTROOT/xdg-data)
+xdg_config_home=$P6_XDG_CONFIG_HOME ($TESTROOT/xdg-config)
+product_sha=2710abb4e10d1ac473f007e94f00001d267a77ea
+evidence_sha=f5b0fd601dcbe7bb5ae28b7e79f1c8a6d7ccb25f
+cwd=$CHECKOUT
+utc_start=2026-09-17T03:12:03Z
+python=Python 3.13.5
+os=Linux 6.12.94+ x86_64
+git_status=clean
+
+== init ==
+{"command":"init","ok":true,"results":[{"root":"$TESTROOT/safe-delete-root","ledger_path":"$TESTROOT/safe-delete-root/ledger.jsonl","lock_path":"$TESTROOT/safe-delete-root/locks/ledger.lock","trash_path":"$TESTROOT/safe-delete-root/trash","objects_path":"$TESTROOT/safe-delete-root/trash/objects"}],"errors":[]}
+
+== add with all six rich inputs ==
+{"command":"add","ok":true,"results":[{"entry_id":"434d8076-fa76-48ea-ac29-b1eae288f15e","path":"$TESTROOT/workspace/metadata.txt","original_path":"$TESTROOT/workspace/metadata.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/434d8076-fa76-48ea-ac29-b1eae288f15e/payload","kind":"file","state":"active","project":"$TESTROOT/workspace/project","session_id":"session-p6-42","reason":"retention review","agent":"luna","tool":"safe-delete-cli","extensions":{"nested":{"source":"p6-scaffold","values":["one",2,true]}}}],"errors":[]}
+
+== show and normalized project filter ==
+{"command":"show","ok":true,"results":[{"entry_id":"434d8076-fa76-48ea-ac29-b1eae288f15e","state":"active","creation":{"schema_version":1,"event_id":"5866e530-ee2c-49a4-9e0d-a98a23e40c5a","entry_id":"434d8076-fa76-48ea-ac29-b1eae288f15e","operation":"trash","state":"active","original_path":"$TESTROOT/workspace/metadata.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/434d8076-fa76-48ea-ac29-b1eae288f15e/payload","kind":"file","timestamp":"2026-09-17T03:12:03.547570Z","project":"$TESTROOT/workspace/project","session_id":"session-p6-42","reason":"retention review","agent":"luna","tool":"safe-delete-cli","extensions":{"nested":{"source":"p6-scaffold","values":["one",2,true]}}},"events":[{"schema_version":1,"event_id":"5866e530-ee2c-49a4-9e0d-a98a23e40c5a","entry_id":"434d8076-fa76-48ea-ac29-b1eae288f15e","operation":"trash","state":"active","original_path":"$TESTROOT/workspace/metadata.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/434d8076-fa76-48ea-ac29-b1eae288f15e/payload","kind":"file","timestamp":"2026-09-17T03:12:03.547570Z","project":"$TESTROOT/workspace/project","session_id":"session-p6-42","reason":"retention review","agent":"luna","tool":"safe-delete-cli","extensions":{"nested":{"source":"p6-scaffold","values":["one",2,true]}}}]}],"errors":[]}
+{"command":"list","ok":true,"results":[{"entry_id":"434d8076-fa76-48ea-ac29-b1eae288f15e","state":"active","original_path":"$TESTROOT/workspace/metadata.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/434d8076-fa76-48ea-ac29-b1eae288f15e/payload","kind":"file","timestamp":"2026-09-17T03:12:03.547570Z","project":"$TESTROOT/workspace/project","session_id":"session-p6-42","reason":"retention review","agent":"luna","tool":"safe-delete-cli","extensions":{"nested":{"source":"p6-scaffold","values":["one",2,true]}}}],"errors":[]}
+
+== absent context does not fabricate identity ==
+{"command":"add","ok":true,"results":[{"entry_id":"7ee75bc3-6671-454e-a54d-f7b206813e20","path":"$TESTROOT/workspace/no-context.txt","original_path":"$TESTROOT/workspace/no-context.txt","trashed_path":"$TESTROOT/safe-delete-root/trash/objects/7ee75bc3-6671-454e-a54d-f7b206813e20/payload","kind":"file","state":"active","project":null,"session_id":null,"reason":null,"agent":null,"tool":"safe-delete-cli","extensions":null}],"errors":[]}
+utc_end=2026-09-17T03:12:03Z
+replay_marker=CAPTURED
