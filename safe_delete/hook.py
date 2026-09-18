@@ -790,10 +790,19 @@ def _management_paths(spec: IntegrationSpec) -> tuple[Path, ...]:
 
 
 def _reject_storage_namespace(spec: IntegrationSpec, explicit_root: str | None) -> None:
-    """Keep package and host configuration bytes outside runtime storage."""
+    """Keep runtime storage bytes out of the package and host boundaries.
+
+    The default package root and the default storage root are the *same*
+    directory (``$XDG_DATA_HOME/safe-delete``).  The frozen contract places the
+    adapter payload under ``<that root>/hooks/`` and the PATH shim under
+    ``<that root>/bin/``, so package state is allowed to share the storage
+    root.  Only the runtime namespaces stay forbidden: ``trash/`` (including
+    ``trash/objects``), ``ledger.jsonl``, and ``locks/``.  See
+    ``docs/architecture/freeze.md`` § Installation and package boundaries.
+    """
 
     layout = layout_for(explicit_root)
-    reserved = (layout.root, layout.trash, layout.ledger, layout.lock)
+    reserved = (layout.trash, layout.ledger, layout.lock.parent)
     for raw_path in _management_paths(spec):
         candidate = _path_value(raw_path, "hook path")
         for reserved_path in reserved:
@@ -804,6 +813,46 @@ def _reject_storage_namespace(spec: IntegrationSpec, explicit_root: str | None) 
                     path=str(candidate),
                     storage_path=str(reserved_path),
                 )
+
+
+def git_checkout_root(path: str | os.PathLike[str]) -> Path | None:
+    """Return the nearest ancestor carrying a Git checkout marker, if any."""
+
+    try:
+        candidate = Path(os.path.abspath(os.fspath(path)))
+    except TypeError:
+        return None
+    if not candidate.is_dir():
+        candidate = candidate.parent
+    while True:
+        # A worktree's .git is a file, while a normal checkout uses a
+        # directory; both mean the path above is a development checkout.
+        if os.path.lexists(candidate / ".git"):
+            return candidate
+        if candidate.parent == candidate:
+            return None
+        candidate = candidate.parent
+
+
+def is_world_writable(path: str | os.PathLike[str]) -> bool:
+    """Report whether an existing path is writable by any user."""
+
+    try:
+        item = os.lstat(path)
+    except OSError:
+        return False
+    if stat.S_ISLNK(item.st_mode):
+        try:
+            item = os.stat(path)
+        except OSError:
+            return False
+    return bool(item.st_mode & stat.S_IWOTH)
+
+
+def payload_source_path(path: str | os.PathLike[str]) -> Path | None:
+    """Read the source dependency captured in a generated payload."""
+
+    return _payload_source_root(Path(os.fspath(path)))
 
 
 @dataclass(frozen=True)
@@ -1310,6 +1359,26 @@ def hook_install(
                 selector=spec.selector,
             )
         if config is None and project is None:
+            recorded_config = existing_entry.get("config_path")
+            if (
+                spec.mode == "pretooluse"
+                and isinstance(recorded_config, str)
+                and recorded_config
+                and str(spec.config_path) != recorded_config
+            ):
+                # The registry keys a host by selector alone.  Adopting the
+                # recorded boundary here would report success while leaving the
+                # newly resolved project unprotected, so this fails closed
+                # instead.
+                raise error(
+                    "storage_failure",
+                    "hook install resolved a different host configuration than the recorded "
+                    "integration boundary; pass --project or --config for the intended boundary, "
+                    "or uninstall the recorded integration first",
+                    selector=spec.selector,
+                    recorded_config_path=recorded_config,
+                    resolved_config_path=str(spec.config_path),
+                )
             spec = _registered_spec(spec, existing_entry)
         if not _registry_entry_matches(spec, existing_entry):
             raise error(
@@ -1396,8 +1465,37 @@ def hook_install(
     result = _status_one(spec, registry, root=root)
     result["changed"] = changed
     result["config_created"] = not host_exists if spec.mode == "pretooluse" else False
-    result["path_activation"] = f"prepend {spec.bin_dir} to PATH" if spec.mode == "path-shim" else None
+    if spec.mode == "path-shim":
+        result["path_activation"] = (
+            f"prepend {spec.bin_dir} to PATH, then re-check with "
+            "`safe-delete hook status path-shim` or `safe-delete doctor`"
+        )
+    else:
+        result["path_activation"] = None
+    result["install_warnings"] = _install_warnings(resolved_cli)
     return result
+
+
+def _install_warnings(resolved_cli: Path) -> list[str]:
+    """Return install-honesty warnings about what this boundary pins."""
+
+    warnings: list[str] = []
+    if is_world_writable(resolved_cli):
+        warnings.append(
+            f"registered CLI is world-writable: {resolved_cli}; "
+            "another user could replace the command this boundary runs"
+        )
+    checkouts: list[Path] = []
+    for candidate in (Path(__file__).resolve().parent.parent, resolved_cli.parent):
+        checkout = git_checkout_root(candidate)
+        if checkout is not None and checkout not in checkouts:
+            checkouts.append(checkout)
+    for checkout in checkouts:
+        warnings.append(
+            f"payload or CLI source is a git checkout: {checkout}; this boundary pins that path, "
+            "so moving or deleting the checkout makes every installed hook fail closed"
+        )
+    return warnings
 
 
 def _raw_registry_entry_for(spec: IntegrationSpec, registry: Mapping[str, Any]) -> Any:

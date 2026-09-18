@@ -590,6 +590,241 @@ class HookEnforcementTests(unittest.TestCase):
                 self.assertEqual(lock.read_bytes(), before[lock])
                 self.assertEqual(sentinel.read_bytes(), before[sentinel])
 
+    def test_default_paths_hook_install_succeeds(self) -> None:
+        """Counterexample A: stock machine must not self-lock.
+
+        ``SAFE_DELETE_ROOT`` and ``XDG_DATA_HOME`` are both unset so the default
+        package root and the default storage root collapse to the *same*
+        directory, which is exactly the configuration that used to fail closed
+        with ``path_forbidden``.
+        """
+
+        disposable_home = self.base / "default-home"
+        disposable_home.mkdir()
+        default_env = {
+            "HOME": str(disposable_home),
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        }
+        with patch.dict(os.environ, default_env, clear=True):
+            from safe_delete.storage import layout_for
+
+            package = package_paths()
+            storage = layout_for(None)
+            self.assertEqual(
+                package["root"],
+                storage.root,
+                "this test is only meaningful when the defaults collapse",
+            )
+            self.assertTrue(
+                str(package["hooks"]).startswith(str(storage.root)),
+                package["hooks"],
+            )
+
+            # Runtime namespaces stay forbidden even though the package root is
+            # allowed to share the storage root.
+            for reserved in (
+                storage.trash,
+                storage.trash / "objects",
+                storage.ledger,
+                storage.lock,
+                storage.lock.parent,
+            ):
+                with self.subTest(reserved=str(reserved)):
+                    with self.assertRaises(SafeDeleteError) as context:
+                        hook_install("claude", config=str(reserved), cli_path=str(CLI))
+                    self.assertEqual(context.exception.code, "path_forbidden")
+
+            # The default-path install itself must succeed at both boundaries.
+            claude = hook_install("claude", cli_path=str(CLI))
+            self.assertTrue(claude["enabled"], claude)
+            self.assertEqual(
+                claude["boundary"]["config_path"],
+                str(disposable_home / ".claude" / "settings.json"),
+            )
+            self.assertTrue(package["pretooluse"].exists())
+
+            shim = hook_install("path-shim", cli_path=str(CLI))
+            self.assertTrue(shim["enabled"], shim)
+            self.assertEqual(len(list(package["bin"].iterdir())), 3)
+
+            # Installing does not require the storage layer to exist yet, but
+            # the boundary can only be *enforced* once it does.  Prove both
+            # halves at the true default root.
+            undeclared = hook_status("path-shim", root=None)[0]
+            self.assertTrue(undeclared["installed"])
+            self.assertFalse(undeclared["enforced"])
+            self.assertEqual(
+                undeclared["storage"]["root"],
+                str(disposable_home / ".local" / "share" / "safe-delete"),
+            )
+
+            initialize_layout(None)
+            shim_dir = disposable_home / ".local" / "share" / "safe-delete" / "bin"
+            with patch.dict(
+                os.environ,
+                {"PATH": str(shim_dir) + os.pathsep + os.environ.get("PATH", "")},
+                clear=False,
+            ):
+                status = hook_status("path-shim", root=None)[0]
+            self.assertTrue(status["enforced"], status)
+            self.assertEqual(status["boundary"]["shim_dir"], str(shim_dir))
+
+    def test_runtime_namespaces_stay_forbidden_when_defaults_collapse(self) -> None:
+        """The pre-fix blanket rejection of the storage root must not return."""
+
+        disposable_home = self.base / "collapsed-home"
+        disposable_home.mkdir()
+        default_env = {
+            "HOME": str(disposable_home),
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        }
+        with patch.dict(os.environ, default_env, clear=True):
+            from safe_delete.storage import layout_for
+
+            storage = layout_for(None)
+            # The package namespace under the storage root is writable...
+            self.assertTrue(str(package_paths()["bin"]).startswith(str(storage.root)))
+            result = hook_install("path-shim", cli_path=str(CLI))
+            self.assertTrue(result["enabled"], result)
+            # ...while the runtime ledger/trash/lock namespaces are not.
+            ledger_before = (storage.ledger).read_bytes() if storage.ledger.exists() else None
+            with self.assertRaises(SafeDeleteError) as context:
+                hook_install("claude", config=str(storage.ledger), cli_path=str(CLI))
+            self.assertEqual(context.exception.code, "path_forbidden")
+            if ledger_before is None:
+                self.assertFalse(storage.ledger.exists())
+            else:
+                self.assertEqual(storage.ledger.read_bytes(), ledger_before)
+
+    def test_cursor_second_project_install_requires_explicit_target(self) -> None:
+        """Counterexample B: a second project must never be a silent no-op.
+
+        The registry keys a host by selector alone, so a default install from a
+        different project used to adopt the *recorded* boundary and report
+        ``changed: false`` while the new project stayed unprotected.
+        """
+
+        initialize_layout(str(self.storage))
+        project_a = self.base / "project-a"
+        project_b = self.base / "project-b"
+        project_a.mkdir()
+        project_b.mkdir()
+
+        first = hook_install(
+            "cursor",
+            project=str(project_a),
+            cli_path=str(CLI),
+            root=str(self.storage),
+        )
+        config_a = project_a / ".cursor" / "hooks.json"
+        config_b = project_b / ".cursor" / "hooks.json"
+        self.assertEqual(first["boundary"]["config_path"], str(config_a))
+        self.assertTrue(config_a.exists())
+        self.assertEqual(
+            len(json.loads(config_a.read_text(encoding="utf-8"))["hooks"]["preToolUse"]),
+            1,
+        )
+        registry_before = hook_registry_path().read_bytes()
+
+        original_cwd = os.getcwd()
+        self.addCleanup(os.chdir, original_cwd)
+        os.chdir(project_b)
+        with self.assertRaises(SafeDeleteError) as context:
+            hook_install("cursor", cli_path=str(CLI), root=str(self.storage))
+        self.assertEqual(context.exception.code, "storage_failure")
+        details = context.exception.as_dict()
+        self.assertEqual(details["selector"], "cursor")
+        self.assertEqual(details["recorded_config_path"], str(config_a))
+        self.assertEqual(details["resolved_config_path"], str(config_b))
+        self.assertIn("--project", details["message"])
+        self.assertIn("--config", details["message"])
+
+        # Nothing was created for project B and the recorded boundary is intact.
+        self.assertFalse(config_b.exists())
+        self.assertFalse((project_b / ".cursor").exists())
+        self.assertEqual(hook_registry_path().read_bytes(), registry_before)
+        self.assertEqual(
+            hook_status("cursor", project=str(project_a), root=str(self.storage))[0]["boundary"][
+                "config_path"
+            ],
+            str(config_a),
+        )
+
+        # An explicit target is the supported retarget spelling and is still
+        # checked against the recorded boundary rather than silently adopted.
+        with self.assertRaises(SafeDeleteError) as explicit:
+            hook_install(
+                "cursor",
+                project=str(project_b),
+                cli_path=str(CLI),
+                root=str(self.storage),
+            )
+        self.assertEqual(explicit.exception.code, "storage_failure")
+        self.assertFalse(config_b.exists())
+
+        # Uninstalling the recorded integration first makes project B installable.
+        hook_uninstall("cursor", project=str(project_a), root=str(self.storage))
+        retargeted = hook_install(
+            "cursor",
+            project=str(project_b),
+            cli_path=str(CLI),
+            root=str(self.storage),
+        )
+        self.assertEqual(retargeted["boundary"]["config_path"], str(config_b))
+        self.assertTrue(config_b.exists())
+
+    def test_install_reports_checkout_pinning_and_world_writable_cli(self) -> None:
+        initialize_layout(str(self.storage))
+
+        # The repository this suite runs from is itself a checkout, so the
+        # default install must say so rather than let the boundary silently
+        # depend on a path that can move.
+        checkout = hook_install("claude", config=str(self.base / "claude.json"), cli_path=str(CLI), root=str(self.storage))
+        self.assertTrue(
+            any("git checkout" in warning for warning in checkout["install_warnings"]),
+            checkout["install_warnings"],
+        )
+        self.assertTrue(
+            any(str(REPOSITORY_ROOT) in warning for warning in checkout["install_warnings"]),
+            checkout["install_warnings"],
+        )
+
+        # A world-writable CLI is called out: another user could replace the
+        # command this boundary runs.
+        loose_cli = self.base / "loose-safe-delete"
+        loose_cli.write_bytes(CLI.read_bytes())
+        loose_cli.chmod(0o777)
+        hook_uninstall("claude", config=str(self.base / "claude.json"), root=str(self.storage))
+        loose = hook_install("claude", config=str(self.base / "claude.json"), cli_path=str(loose_cli), root=str(self.storage))
+        self.assertEqual(loose["cli_path"], str(loose_cli))
+        self.assertIn(
+            f"registered CLI is world-writable: {loose_cli}",
+            " ".join(loose["install_warnings"]),
+            loose["install_warnings"],
+        )
+
+        # A tightly permissioned CLI produces no world-writable claim.
+        tight_cli = self.base / "tight-safe-delete"
+        tight_cli.write_bytes(CLI.read_bytes())
+        tight_cli.chmod(0o755)
+        hook_uninstall("claude", config=str(self.base / "claude.json"), root=str(self.storage))
+        tight = hook_install("claude", config=str(self.base / "claude.json"), cli_path=str(tight_cli), root=str(self.storage))
+        self.assertFalse(
+            any("world-writable" in warning for warning in tight["install_warnings"]),
+            tight["install_warnings"],
+        )
+
+    def test_path_shim_activation_message_names_bin_and_recheck(self) -> None:
+        initialize_layout(str(self.storage))
+        result = hook_install("path-shim", cli_path=str(CLI), root=str(self.storage))
+        self.assertEqual(
+            result["path_activation"],
+            f"prepend {package_paths()['bin']} to PATH, then re-check with "
+            "`safe-delete hook status path-shim` or `safe-delete doctor`",
+        )
+        claude = hook_install("claude", config=str(self.base / "claude.json"), cli_path=str(CLI), root=str(self.storage))
+        self.assertIsNone(claude["path_activation"])
+
     def test_install_registry_failure_rolls_back_package_and_host_registration(self) -> None:
         initialize_layout(str(self.storage))
         config = self.base / "claude.json"

@@ -5,6 +5,12 @@ base-10 integer followed by either ``d`` (days) or ``h`` (hours), for example
 ``30d`` or ``720h``.  Signs, decimals, whitespace, bare numbers, and other
 unit suffixes are usage errors.
 
+``--before`` accepts a timezone-bearing RFC3339 instant, or the exact literal
+``now``, which resolves to the invocation's UTC clock (``as_of``).  ``now`` is
+sugar for the "everything eligible right now" spelling: it never implies
+``--execute --yes``, and a report whose cutoff is not in the past carries an
+explicit wipe-all warning.
+
 The initial ``trash`` event timestamp is the only age anchor.  Restore and
 purge lifecycle timestamps never reset it.  Ordinary eligibility is inclusive:
 an entry whose anchor is at or before the selected UTC cutoff is eligible.
@@ -25,6 +31,7 @@ from .errors import SafeDeleteError, error
 
 DEFAULT_RETENTION_DAYS = 30
 _SECONDS_PER_DAY = 24 * 60 * 60
+NOW_LITERAL = "now"
 _DECIMAL_INTEGER = re.compile(r"^[0-9]+$")
 _OLDER_THAN = re.compile(r"^([0-9]+)([dh])$")
 _RFC3339_WITH_ZONE = re.compile(
@@ -218,6 +225,18 @@ class RetentionPolicy:
             )
 
         if before is not None:
+            if before == NOW_LITERAL:
+                # The "everything eligible right now" spelling.  Resolving it
+                # to the invocation clock keeps the cutoff auditable in the
+                # report instead of asking the operator for a future timestamp.
+                return cls(
+                    source="before_now",
+                    as_of=as_of,
+                    cutoff=as_of,
+                    threshold=None,
+                    threshold_days=None,
+                    threshold_duration=None,
+                )
             cutoff = parse_rfc3339(before, field_name="--before")
             return cls(
                 source="before",

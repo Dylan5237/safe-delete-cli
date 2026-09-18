@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-from safe_delete.cli import main
+from safe_delete.__main__ import main
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

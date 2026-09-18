@@ -156,6 +156,56 @@ class PurgeTests(unittest.TestCase):
                     RetentionPolicy.resolve(before=value, now=now)
                 self.assertEqual(raised.exception.code, "usage_error")
 
+    def test_before_now_is_wipe_all_sugar_but_never_executes_by_itself(self) -> None:
+        now = _datetime.datetime(2026, 9, 16, 12, 0, tzinfo=_datetime.timezone.utc)
+        policy = RetentionPolicy.resolve(before="now", now=now, environment="7")
+        # ``now`` is the invocation clock, so every active entry is eligible.
+        self.assertEqual(policy.source, "before_now")
+        self.assertEqual(policy.as_of, now)
+        self.assertEqual(policy.cutoff, now)
+        self.assertIsNone(policy.threshold)
+        self.assertEqual(policy.as_dict()["cutoff"], "2026-09-16T12:00:00Z")
+
+        # A future-dated --before is the same wipe-all shape and warns too.
+        future = RetentionPolicy.resolve(
+            before="2030-01-01T00:00:00Z",
+            now=now,
+        )
+        self.assertEqual(future.source, "before")
+
+        # The literal is exact: it is not a case-insensitive keyword and it is
+        # not a substitute for an RFC3339 instant.
+        for value in ("NOW", "now ", "Now"):
+            with self.subTest(value=value):
+                with self.assertRaises(SafeDeleteError) as raised:
+                    RetentionPolicy.resolve(before=value, now=now)
+                self.assertEqual(raised.exception.code, "usage_error")
+
+    def test_before_now_dry_run_reports_wipe_all_without_mutation(self) -> None:
+        self.init_storage()
+        entry_id, payload = self.add_file("fresh.txt")
+        ledger_before = (self.storage / "ledger.jsonl").read_bytes()
+
+        code, envelope = self.run_cli("purge", "--before", "now")
+        self.assertEqual(code, 0, envelope)
+        report = envelope["results"][0]
+        self.assertTrue(report["dry_run"])
+        self.assertEqual(report["policy"]["source"], "before_now")
+        self.assertIn("warning", report)
+        self.assertIn("every active entry is eligible", report["warning"])
+        self.assertEqual(report["candidates"], [entry_id])
+        self.assertEqual(payload.read_text(encoding="utf-8"), "fresh.txt")
+        self.assertEqual((self.storage / "ledger.jsonl").read_bytes(), ledger_before)
+
+        # The sugar never implies --execute --yes: without both, the CLI is
+        # still a dry run even though the cutoff selects everything.
+        code, envelope = self.run_cli("purge", "--before", "now", "--execute")
+        self.assertNotEqual(code, 0)
+        self.assertFalse(envelope["ok"])
+        self.assertEqual(envelope["errors"][0]["code"], "usage_error")
+        self.assertEqual(payload.read_text(encoding="utf-8"), "fresh.txt")
+        self.assertEqual((self.storage / "ledger.jsonl").read_bytes(), ledger_before)
+
     def test_retention_overflow_is_usage_error_without_mutation(self) -> None:
         self.init_storage()
         entry_id, payload = self.add_file("untouched.txt")

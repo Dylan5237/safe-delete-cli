@@ -12,6 +12,7 @@ from typing import Any
 
 from . import CONTRACT_VERSION, SCHEMA_VERSION, __version__
 from .audit import AuditReport, LedgerEntry, audit_layout, is_uuid4
+from .doctor import run_doctor
 from .errors import (
     EXIT_SUCCESS,
     SafeDeleteError,
@@ -127,6 +128,9 @@ def build_parser() -> argparse.ArgumentParser:
         management_parser.add_argument("--project")
         if hook_command == "install":
             management_parser.add_argument("--cli", dest="cli_path")
+
+    doctor_parser = commands.add_parser("doctor")
+    _common_options(doctor_parser)
 
     version_parser = commands.add_parser("version")
     _common_options(version_parser)
@@ -802,6 +806,8 @@ def _command_name(args: argparse.Namespace) -> str:
 def _dispatch(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
     if args.command == "init":
         return _handle_init(args)
+    if args.command == "doctor":
+        return [run_doctor(args.root)], []
     if args.command == "list":
         return _handle_list(args)
     if args.command == "show":
@@ -829,7 +835,7 @@ def _parse_error_command(raw_args: list[str]) -> str:
     for index, value in enumerate(raw_args):
         if value == "hook" and index + 1 < len(raw_args) and raw_args[index + 1] in {"install", "status", "disable", "uninstall"}:
             return f"hook {raw_args[index + 1]}"
-        if value in {"init", "add", "list", "show", "restore", "purge", "version"}:
+        if value in {"init", "add", "list", "show", "restore", "purge", "doctor", "version"}:
             return value
     return "safe-delete"
 
