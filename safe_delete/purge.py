@@ -397,7 +397,7 @@ def _report_projection(
     candidates: list[str],
     outcomes: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    return {
+    report: dict[str, Any] = {
         "mode": "execute" if execute else "dry_run",
         "dry_run": not execute,
         "policy": policy.as_dict(),
@@ -405,6 +405,13 @@ def _report_projection(
         "decisions": decisions,
         "outcomes": outcomes,
     }
+    if policy.cutoff >= policy.as_of:
+        report["warning"] = (
+            "cutoff is not in the past: every active entry is eligible "
+            "(wipe-all semantics); read candidates before extending this "
+            "invocation with --execute --yes"
+        )
+    return report
 
 
 def _audit_decisions(

@@ -1594,5 +1594,327 @@ class CliContractTests(unittest.TestCase):
             source.unlink(missing_ok=True)
 
 
+class PlatformPreflightTests(unittest.TestCase):
+    """The POSIX-only runtime must fail with one line, not an import traceback."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory(prefix="safe-delete-preflight-test-")
+        self.base = Path(self.temp_dir.name)
+        self.storage = self.base / "storage"
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_supported_platform_returns_none(self) -> None:
+        from safe_delete import platform_check
+
+        self.assertEqual(platform_check.missing_posix_primitives(), [])
+        self.assertIsNone(platform_check.preflight(["version"]))
+        report = platform_check.platform_report()
+        self.assertTrue(report["supported"])
+        self.assertEqual(report["missing_primitives"], [])
+        self.assertEqual(report["requires"], platform_check.REQUIRED_PLATFORM)
+
+    def test_missing_primitive_writes_one_line_and_exits_two(self) -> None:
+        from safe_delete import platform_check
+
+        stream = io.StringIO()
+        with patch.object(
+            platform_check,
+            "missing_posix_primitives",
+            return_value=["fcntl"],
+        ):
+            code = platform_check.preflight(["version"], stream=stream)
+        self.assertEqual(code, 2)
+        self.assertEqual(code, platform_check.UNSUPPORTED_PLATFORM_EXIT)
+        self.assertEqual(
+            stream.getvalue(),
+            "unsupported platform: requires Linux/macOS/WSL (fcntl)\n",
+        )
+        self.assertEqual(stream.getvalue().count("\n"), 1)
+
+        # Any single missing directory flag is unsupported for the same reason.
+        with patch.object(
+            platform_check,
+            "missing_posix_primitives",
+            return_value=["O_NOFOLLOW"],
+        ):
+            self.assertEqual(platform_check.preflight(["version"], stream=io.StringIO()), 2)
+
+    def test_module_entry_point_reports_missing_fcntl_without_traceback(self) -> None:
+        # Block ``fcntl`` the way a native Windows interpreter would: a
+        # ``sitecustomize`` meta-path finder that refuses the module name.
+        shim = self.base / "shim"
+        shim.mkdir()
+        (shim / "sitecustomize.py").write_text(
+            "import sys\n"
+            "\n"
+            "\n"
+            "class _Blocker:\n"
+            "    def find_spec(self, name, path=None, target=None):\n"
+            "        if name == 'fcntl':\n"
+            "            raise ModuleNotFoundError(\"No module named 'fcntl'\", name='fcntl')\n"
+            "        return None\n"
+            "\n"
+            "\n"
+            "sys.meta_path.insert(0, _Blocker())\n",
+            encoding="utf-8",
+        )
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = str(shim)
+        environment["HOME"] = str(self.base / "home")
+        environment.pop("SAFE_DELETE_ROOT", None)
+        environment.pop("XDG_DATA_HOME", None)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(CLI),
+                "--root",
+                str(self.storage),
+                "--json",
+                "version",
+            ],
+            cwd=REPOSITORY_ROOT,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 2, completed)
+        self.assertEqual(
+            completed.stderr,
+            "unsupported platform: requires Linux/macOS/WSL (fcntl)\n",
+        )
+        self.assertEqual(completed.stdout, "")
+        self.assertNotIn("Traceback", completed.stderr)
+        self.assertNotIn("ModuleNotFoundError", completed.stderr)
+        self.assertFalse(self.storage.exists(), "the preflight must not touch storage")
+
+    def test_module_entry_point_runs_the_cli_when_the_platform_is_supported(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from safe_delete.__main__ import main; raise SystemExit(main(['version']))",
+            ],
+            cwd=REPOSITORY_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed)
+        self.assertIn("contract_version", completed.stdout)
+        self.assertNotIn("unsupported platform", completed.stderr)
+
+
+class DoctorTests(unittest.TestCase):
+    """``doctor`` aggregates read-only facts without making coverage claims."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory(prefix="safe-delete-doctor-test-")
+        self.base = Path(self.temp_dir.name)
+        self.storage = self.base / "storage"
+        self.workspace = self.base / "workspace"
+        self.workspace.mkdir()
+        self.environment = {
+            "HOME": str(self.base / "home"),
+            "XDG_DATA_HOME": str(self.base / "data"),
+            "XDG_CONFIG_HOME": str(self.base / "config"),
+        }
+        self.env_patch = patch.dict(os.environ, self.environment, clear=False)
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_doctor_is_read_only_on_a_fresh_root(self) -> None:
+        code, payload = run_cli(self.storage, "doctor")
+        self.assertEqual(code, 0, payload)
+        self.assertTrue(payload["ok"], payload)
+        report = payload["results"][0]
+        self.assertTrue(report["read_only"])
+        self.assertFalse(report["needs_attention"], report["problems"])
+        self.assertEqual(report["problems"], [])
+        self.assertFalse(self.storage.exists(), "doctor must not initialize storage")
+        self.assertFalse(
+            (self.base / "data" / "safe-delete").exists(),
+            "doctor must not create the package tree",
+        )
+        self.assertFalse((self.base / "config" / "safe-delete").exists())
+        self.assertEqual(report["artifacts"], [])
+        self.assertEqual(
+            [item["selector"] for item in report["boundaries"]],
+            ["claude", "cursor", "path-shim"],
+        )
+        self.assertFalse(any(item["installed"] for item in report["boundaries"]))
+        self.assertTrue(report["platform_preflight"]["passed"])
+        self.assertEqual(
+            report["platform_preflight"]["required"],
+            "Linux/macOS/WSL (fcntl)",
+        )
+        self.assertEqual(report["platform_preflight"]["missing_primitives"], [])
+
+    def test_doctor_carries_the_bypass_inventory_verbatim(self) -> None:
+        from safe_delete.hook import OUT_OF_COVERAGE_BYPASSES
+
+        code, payload = run_cli(self.storage, "doctor")
+        self.assertEqual(code, 0, payload)
+        report = payload["results"][0]
+        self.assertEqual(report["out_of_coverage"], list(OUT_OF_COVERAGE_BYPASSES))
+        self.assertEqual(len(report["out_of_coverage"]), 10)
+        self.assertEqual(
+            report["scope"],
+            "enforced applies only to a registered (host, config_path) boundary",
+        )
+        self.assertIn("not fixed", report["restore"]["residual_note"])
+        self.assertIn("Exception #12", report["restore"]["residual_note"])
+
+    def test_doctor_boundaries_match_hook_status_per_selector(self) -> None:
+        code, payload = run_cli(self.storage, "doctor")
+        self.assertEqual(code, 0, payload)
+        doctor_boundaries = payload["results"][0]["boundaries"]
+
+        status_code, status_payload = run_cli(self.storage, "hook", "status")
+        self.assertEqual(status_code, 0, status_payload)
+        self.assertEqual(
+            [(item["selector"], item["installed"]) for item in doctor_boundaries],
+            [(item["selector"], item["installed"]) for item in status_payload["results"]],
+        )
+        for doctor_item, status_item in zip(doctor_boundaries, status_payload["results"]):
+            self.assertEqual(
+                doctor_item["out_of_coverage"],
+                status_item["out_of_coverage"],
+            )
+
+    def test_doctor_never_claims_coverage(self) -> None:
+        # Regression guard for the forbidden-claims contract: doctor reports
+        # what is *not* covered as data and never asserts the current project is
+        # protected, that enforcement exists on other platforms, or that a
+        # usable storage root makes deletion safe.
+        code, payload = run_cli(self.storage, "doctor")
+        self.assertEqual(code, 0, payload)
+        report = payload["results"][0]
+
+        # Bypass names may only ever show up inside the verbatim inventory, at
+        # the top level or inside a boundary.  Strip every ``out_of_coverage``
+        # list and require the names to be absent from everything else.
+        inventory: list[str] = []
+
+        def _strip(node: object) -> object:
+            if isinstance(node, dict):
+                result: dict[str, object] = {}
+                for key, value in node.items():
+                    if key == "out_of_coverage":
+                        inventory.extend(str(item) for item in value)
+                    else:
+                        result[key] = _strip(value)
+                return result
+            if isinstance(node, list):
+                return [_strip(value) for value in node]
+            return node
+
+        claim_text = json.dumps(_strip(report), sort_keys=True).lower()
+        inventory_text = " ".join(inventory).lower()
+        self.assertTrue(inventory, "the bypass inventory must be present as data")
+        for bypass in ("find -delete", "git clean", "busybox", "/bin/rm", "os.unlink"):
+            with self.subTest(bypass=bypass):
+                self.assertNotIn(bypass, claim_text)
+        self.assertIn("find -delete", inventory_text)
+        self.assertIn("/bin/rm", inventory_text)
+
+        # Neither the report nor the inventory may mention a surface doctor
+        # never inspects, or assert a fix that has not happened.
+        whole = json.dumps(report, sort_keys=True).lower()
+        for forbidden in (
+            "powershell",
+            "os.unlink",
+            "native windows",
+            "sudo",
+            "your current project is covered",
+            "current project is protected",
+            "exception #12 is fixed",
+            "deletion is safe",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, whole)
+
+        # The only mention of restore-adjacent risk is the residual note.
+        self.assertEqual(report["restore"]["residual_note"].count("Exception #12"), 1)
+        self.assertIn("not fixed", report["restore"]["residual_note"])
+
+    def test_doctor_reports_artifacts_and_flags_missing_payload_source(self) -> None:
+        from safe_delete.doctor import run_doctor
+        from safe_delete.hook import hook_install, hook_uninstall
+
+        self.assertEqual(run_cli(self.storage, "init")[0], 0)
+        config = self.base / "claude.json"
+        hook_install("claude", config=str(config), cli_path=str(CLI), root=str(self.storage))
+
+        report = run_doctor(str(self.storage))
+        self.assertTrue(report["read_only"])
+        self.assertEqual(len(report["artifacts"]), 1)
+        artifact = report["artifacts"][0]
+        self.assertEqual(
+            artifact["path"],
+            str(self.base / "data" / "safe-delete" / "hooks" / "v1" / "pretooluse"),
+        )
+        self.assertTrue(artifact["payload_source_exists"], artifact)
+        self.assertEqual(artifact["payload_source"], str(REPOSITORY_ROOT))
+        self.assertEqual(artifact["git_checkout"], str(REPOSITORY_ROOT))
+
+        # Running from a checkout is reported honestly: this boundary pins a
+        # path that can move.  The registered CLI is mode 0755, so it is not
+        # additionally blamed for being world-writable.
+        self.assertEqual(report["cli"]["paths"], [str(CLI)])
+        self.assertEqual(report["cli"]["world_writable"], [])
+        self.assertTrue(report["needs_attention"])
+        self.assertEqual(len(report["problems"]), 1, report["problems"])
+        self.assertIn("payload source is a git checkout", report["problems"][0])
+        self.assertNotIn("world-writable", report["problems"][0])
+
+        hook_uninstall("claude", config=str(config), root=str(self.storage))
+        after = run_doctor(str(self.storage))
+        self.assertEqual(after["artifacts"], [])
+        self.assertFalse(after["needs_attention"], after["problems"])
+
+    def test_doctor_flags_world_writable_registered_cli(self) -> None:
+        from safe_delete.doctor import run_doctor
+        from safe_delete.hook import hook_install, hook_uninstall
+
+        self.assertEqual(run_cli(self.storage, "init")[0], 0)
+        loose_cli = self.base / "loose-safe-delete"
+        loose_cli.write_bytes(CLI.read_bytes())
+        loose_cli.chmod(0o777)
+        config = self.base / "claude.json"
+        hook_install("claude", config=str(config), cli_path=str(loose_cli), root=str(self.storage))
+
+        report = run_doctor(str(self.storage))
+        self.assertEqual(report["cli"]["world_writable"], [str(loose_cli)])
+        self.assertIn(f"registered CLI is world-writable: {loose_cli}", report["problems"])
+        self.assertTrue(report["needs_attention"])
+
+        # An uninstalled boundary must not be blamed for a loose CLI.
+        hook_uninstall("claude", config=str(config), root=str(self.storage))
+        self.assertFalse(run_doctor(str(self.storage))["needs_attention"])
+
+    def test_doctor_artifact_paths_are_derived_from_status(self) -> None:
+        from safe_delete.doctor import _artifact_paths
+
+        shim = {"mode": "path-shim", "boundary": {"shim_dir": "/tmp/example-bin"}}
+        self.assertEqual(
+            [path.name for path in _artifact_paths(shim)],
+            ["rm", "rmdir", "unlink"],
+        )
+        self.assertEqual(_artifact_paths({"mode": "path-shim", "boundary": {}}), [])
+        self.assertEqual(_artifact_paths({"mode": "path-shim"}), [])
+        adapter = {
+            "mode": "pretooluse",
+            "package": {"adapter_path": "/tmp/example-adapter"},
+        }
+        self.assertEqual([str(path) for path in _artifact_paths(adapter)], ["/tmp/example-adapter"])
+        self.assertEqual(_artifact_paths({"package": {}}), [])
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

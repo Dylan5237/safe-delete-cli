@@ -1,14 +1,20 @@
 # P7 agent usage guide — current behavior
 
-Status: **docs-only proposal material, pre-freeze.** This document describes what
-the CLI does **today** on `main @ bf9d21e`. It does not announce a `doctor`
-subcommand, new flags, or any install fix; those are freeze-gated proposals
-tracked in the P7 Freeze Issue. See `docs/project/p7-adversarial-review.md` for
-the review this guide implements, and `docs/project/p7-install-notes.md` for the
-install counterexamples.
+Status: **post-freeze implementation record, branch `fix/22-install-doctor`
+(Issue #22, FREEZE ACK recorded 2026-09-18), not a Phase PASS.**
+
+The sections below were originally written pre-freeze against `main @ bf9d21e`
+as proposal material. They now describe the implemented behavior on this branch:
+the `doctor` subcommand, the platform preflight, the `--before now` purge sugar,
+and the two install fixes (A and B) are implemented here. Counterexample C
+(payload pinned to the checkout) is **not** fixed — it is now *warned about*, at
+install time and by `doctor`. See `docs/project/p7-adversarial-review.md` for the
+review this guide implements, and `docs/project/p7-install-notes.md` for the
+install counterexamples and their status.
 
 Every command and output excerpt below was run against a temporary
-`SAFE_DELETE_ROOT` on `bf9d21e`. Entry ids shown as
+`SAFE_DELETE_ROOT` in this worktree, or on `bf9d21e` where a section is marked as
+pre-freeze evidence. Entry ids shown as
 `550e8400-e29b-41d4-a716-446655440000` are placeholders, not evidence from any
 real machine.
 
@@ -166,22 +172,37 @@ enforces today:
 | `purge --execute --json` | exit 2, `usage_error`: `--execute requires --yes confirmation; no payloads were changed` |
 | `purge --dry-run --execute --json` | exit 2, `usage_error`: `--dry-run and --execute are mutually exclusive` |
 | `purge --older-than 0d --json` | exit 2, `usage_error`: `--older-than must be a positive integer followed by d or h` |
-| `purge --before now --json` | exit 2, `usage_error`: `--before must be an RFC3339 timestamp with a timezone` |
+| `purge --before now --json` | exit 0, `"mode":"dry_run"`, `"policy":{"source":"before_now",...}` |
+| `purge --before now --execute --json` | exit 2, `usage_error`: `--execute requires --yes confirmation; no payloads were changed` |
+| `purge --before NOW --json` | exit 2, `usage_error`: `--before must be an RFC3339 timestamp with a timezone` |
 
 Threshold precedence: `--older-than`/`--before` → `SAFE_DELETE_RETENTION_DAYS`
-→ 30 days. `--before` requires an RFC3339 timestamp **with** a timezone; the
-retention anchor is UTC, so use `Z`. `2026-09-01T00:00:00Z` is valid;
-`2026-09-01` and `now` are not.
+→ 30 days. `--before` accepts an RFC3339 timestamp **with** a timezone — the
+retention anchor is UTC, so use `Z` — or the exact literal `now`.
+`2026-09-01T00:00:00Z` and `now` are valid; `2026-09-01`, `NOW`, and `now ` are
+not.
 
 ### Wipe-all warning
 
-There is no `purge --all` and no `--before now` sugar today. The safe spelling
-for "purge everything eligible right now" is:
+`--before now` is sugar for "everything eligible right now". It resolves to the
+invocation's own UTC clock (reported as `policy.as_of` / `policy.cutoff`), and
+it **never** implies `--execute --yes`:
 
 ```bash
-./safe-delete purge --before "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --json   # preview first
-./safe-delete purge --before "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --execute --yes --json
+./safe-delete purge --before now --json                       # preview, always
+./safe-delete purge --before now --execute --yes --json       # only after reading the preview
 ```
+
+Whenever the resolved cutoff is not in the past — `--before now` always, and any
+future RFC3339 instant — the report carries an explicit warning, so a wipe-all
+preview is never silent:
+
+```console
+$ ./safe-delete purge --before now --json
+{"command":"purge","ok":true,"results":[{"mode":"dry_run","dry_run":true,"policy":{"source":"before_now","as_of":"2026-09-18T09:06:42.205843Z","cutoff":"2026-09-18T09:06:42.205843Z","cutoff_utc":"2026-09-18T09:06:42.205843Z","threshold_days":null,"threshold_duration":null},"candidates":["bf5daada-c1e4-49a8-8553-3d513844b2e8"],"decisions":[…],"outcomes":[],"warning":"cutoff is not in the past: every active entry is eligible (wipe-all semantics); read candidates before extending this invocation with --execute --yes"}],"errors":[]}
+```
+
+(Output above is abridged only at `decisions`; every other key is verbatim.)
 
 **`--before` accepts a future timestamp, and a future cutoff makes every active
 entry immediately eligible.** A command such as
@@ -189,16 +210,15 @@ entry immediately eligible.** A command such as
 **all** active entries. That is wipe-all semantics, not a typo guard — there is
 no prompt or second confirmation past `--yes`. The safest form of this is
 **first** running the same invocation without `--execute --yes` and confirming
-that `candidates` matches your intent. The `--before now` rejection message is
-not an invitation to substitute a future date.
+that `candidates` matches your intent.
 
-One boundary of the `--before "$(date -u +%Y-%m-%dT%H:%M:%SZ)"` spelling, so
-nobody mistakes it for breakage: `date` emits whole seconds, so an entry whose
-age anchor falls in the *current* second is still `too_young` relative to that
-truncated cutoff and is **not** among the candidates. Entries added at least a
-second earlier are all candidates. If the preview returns fewer candidates than
-you expected, read `decisions[].reason` and re-run rather than reaching for a
-future timestamp.
+An equivalent spelling is `--before "$(date -u +%Y-%m-%dT%H:%M:%SZ)"`. One
+boundary of it, so nobody mistakes it for breakage: `date` emits whole seconds,
+so an entry whose age anchor falls in the *current* second is still `too_young`
+relative to that truncated cutoff and is **not** among the candidates. Entries
+added at least a second earlier are all candidates. `--before now` does not have
+that truncation gap, because the cutoff is the invocation clock itself rather
+than a whole-second rendering of it.
 
 ### Crash recovery is not capped by the cutoff
 
@@ -210,10 +230,11 @@ protects entries that a previous run already selected.
 
 ## 5. Bypass inventory — out of coverage
 
-This is the verbatim `out_of_coverage` list reported by `hook status --json` and
-the P4 replay map (`docs/project/p4-hook-coverage.md`). It is the complete
-statement of what the product does **not** intercept. Do not soften it to "most
-deletions are caught".
+This is the verbatim `out_of_coverage` list reported by `hook status --json`,
+carried unchanged into `doctor --json`, and used by the P4 replay map
+(`docs/project/p4-hook-coverage.md`). It is the complete statement of what the
+product does **not** intercept. Do not soften it to "most deletions are
+caught".
 
 1. Python/Go/Node filesystem APIs
 2. `find -delete`
@@ -239,10 +260,24 @@ boundary that is actually registered. Treat everything else as unprotected.
 **Supported:** Linux, macOS, and WSL. **Not supported:** native Windows Python.
 
 The storage layer imports `fcntl` at module import time and uses
-`O_NOFOLLOW`/`O_DIRECTORY`. On a native Windows interpreter **every** subcommand,
-including `version`, raises `ModuleNotFoundError: No module named 'fcntl'`. That
-message means the wrong interpreter was used, not that the product is broken —
-run it inside WSL (or Linux/macOS) with a POSIX Python.
+`O_NOFOLLOW`/`O_DIRECTORY`. On a native Windows interpreter the entry point now
+preflights the platform **before** that import and fails with one line instead of
+a traceback:
+
+```console
+$ python ./safe-delete version
+unsupported platform: requires Linux/macOS/WSL (fcntl)
+$ echo $?
+2
+```
+
+The message is written to stderr, nothing is written to stdout, and no storage
+is created. `doctor --json` reports the same facts as data
+(`platform_preflight.required`, `.passed`, `.missing_primitives`). This is a
+diagnosis, not an enforcement or portability claim: it means the wrong
+interpreter was used, not that the product is broken — and not that any
+Windows-side deletion is covered. Run it inside WSL (or Linux/macOS) with a
+POSIX Python.
 
 | Path form | Status |
 | --- | --- |
@@ -264,14 +299,24 @@ it; the observability promise is "run `list`/`show` inside WSL".
 
 ## 7. Hook status and boundary reading
 
-`hook status` exists today. There is **no** top-level `status` command and **no**
-`doctor` command in this version — `./safe-delete --help` lists
-`{init,add,list,show,restore,purge,hook,version}` only.
+`hook status` exists, and so does `doctor`. There is still **no** top-level
+`status` command — `./safe-delete --help` lists
+`{init,add,list,show,restore,purge,hook,doctor,version}`.
 
 ```bash
 ./safe-delete hook status --json          # all selectors
 ./safe-delete hook status claude --json   # one selector
+./safe-delete doctor --json               # read-only aggregate of the above
 ```
+
+`doctor` is **read-only**: it never writes, creates, or repairs, and it does not
+initialize a storage root. It aggregates the platform preflight, the resolved
+storage root and its usability, the same per-selector `hook status` entries
+(each carrying its own `out_of_coverage` verbatim), the captured payload source
+of every *installed* artifact, and the resolved CLI paths with a world-writable
+flag. `needs_attention` is true only when one of those inspected surfaces has a
+problem; `false` means "nothing detected", never "your project is protected" and
+never "deletion is safe".
 
 `hook status` (no selector) prints one entry per selector
 (`claude`, `cursor`, `path-shim`), each with:
@@ -294,8 +339,14 @@ proven". It never means "your current project is covered" — Cursor installs ar
 ### PATH shim activation is operator-owned
 
 Installing `path-shim` writes shim executables but **does not modify your shell
-startup files**. The install result carries a hint such as
-`path_activation: "prepend <dir> to PATH"`. Activation is your responsibility:
+startup files**. The install result carries a hint naming the exact directory
+and the commands to re-check:
+
+```json
+"path_activation": "prepend <shim-dir> to PATH, then re-check with `safe-delete hook status path-shim` or `safe-delete doctor`"
+```
+
+Activation is your responsibility:
 
 ```bash
 export PATH="$XDG_DATA_HOME/safe-delete/bin:$PATH"
@@ -303,13 +354,28 @@ export PATH="$XDG_DATA_HOME/safe-delete/bin:$PATH"
 
 Subsequent shells, other tools, and other agents may reorder PATH, and
 `path_precedence` in `hook status` only reflects the **current process**
-environment. After changing PATH, re-check with `hook status` — and put the
-export somewhere durable if you need it in new shells.
+environment. After changing PATH, re-check with `hook status` or `doctor` — and
+put the export somewhere durable if you need it in new shells.
 
 Install-time trust notes: `hook install --cli PATH` accepts any executable path
-and pins it into the registry, including a world-writable script. Prefer the
-repository's own `./safe-delete`, and never point `--cli` at a path another user
-can write. Tightening this is a P7 proposal item, not current behavior.
+and pins it into the registry, including a world-writable script. It now
+**warns** in `install_warnings` when the registered CLI is world-writable
+(`registered CLI is world-writable: <path>; another user could replace the
+command this boundary runs`), and `doctor` reports the same condition as a
+problem. It does not reject the install. Prefer the repository's own
+`./safe-delete`, and never point `--cli` at a path another user can write.
+
+Install also warns when the payload source or the CLI resolves inside a Git
+checkout (`payload or CLI source is a git checkout: <checkout>; this boundary
+pins that path, so moving or deleting the checkout makes every installed hook
+fail closed`). That is counterexample C in `docs/project/p7-install-notes.md` —
+flagged, not fixed.
+
+The `path_activation` hint now names the directory and the re-check commands:
+
+```json
+"path_activation": "prepend <shim-dir> to PATH, then re-check with `safe-delete hook status path-shim` or `safe-delete doctor`"
+```
 
 ## 8. Installing hooks — per-project reality
 
@@ -322,18 +388,46 @@ cd /path/to/project
 /path/to/safe-delete/safe-delete hook install cursor --json
 ```
 
-Because the registry keys Cursor by selector, a second project does not silently
-get covered — see `docs/project/p7-install-notes.md` (counterexample B) for the
-exact failure and the uninstall-then-install workaround. `uninstall` clears only
-the registered boundary; it does not clean up other projects' config files.
+Because the registry keys Cursor by selector, only one Cursor boundary can be
+registered at a time. Installing from a second project without `--project` or
+`--config` now **fails closed** instead of silently reporting `changed: false`
+against the first project:
+
+```console
+$ cd <projB> && /path/to/safe-delete hook install cursor --json
+{"command":"hook install","ok":false,"results":[],"errors":[{"code":"storage_failure","message":"hook install resolved a different host configuration than the recorded integration boundary; pass --project or --config for the intended boundary, or uninstall the recorded integration first","selector":"cursor","recorded_config_path":"<projA>/.cursor/hooks.json","resolved_config_path":"<projB>/.cursor/hooks.json"}]}
+$ echo $?
+4
+```
+
+No `ok:true` result is ever returned for a project that was left unprotected.
+Retarget with uninstall-then-install; `--project`/`--config` for a *different*
+boundary while one is registered fails with
+`hook configuration does not match the recorded integration boundary` (exit 4),
+so the two paths agree. See `docs/project/p7-install-notes.md` (counterexample
+B, now marked fixed) for the full before/after. `uninstall` clears only the
+registered boundary; it does not clean up other projects' config files.
+
+Remember the scope limit: `enforced: true` means **this one
+`(host, config_path)` boundary is proven**. It never means "your current project
+is covered".
 
 ## 9. What this document does not claim
 
-- No `doctor` command, no top-level `status`, no `purge --all`/`--before now`
-  sugar, no install self-lock fix, no platform preflight. All are P7 Freeze
-  Issue proposals.
+- No top-level `status` command (only `hook status`, which `doctor` also
+  reports) and no `purge --all`. `--before now` is sugar, not `--all`: it still
+  previews by default and still requires `--execute --yes` to remove anything.
+- No claim that install fixes A and B make a project protected. Counterexample
+  C (the payload is pinned to the checkout) is **not** fixed — it is warned
+  about at install time and reported by `doctor`. There is still no vendored,
+  self-contained payload.
+- No claim that `doctor`'s `needs_attention: false` means anything beyond "no
+  problem was detected in the inspected surfaces". It is not a coverage claim,
+  not a statement that Exception #12 is fixed, and not a statement that a
+  usable storage root makes deletion safe.
 - No GUI, tray, dashboard, or web viewer exists or is planned for this phase.
 - No scheduler installation: cron/systemd setup is operator-owned.
-- No claim about native Windows, about `/mnt/*` roots, or about a real Cursor
-  host replay — the Cursor integration is verified at the protocol layer; a real
-  Cursor session replay is a P7 evidence gap.
+- No claim about native Windows enforcement, about `/mnt/*` roots, or about a
+  real Cursor host replay. The platform preflight only *diagnoses* a missing
+  `fcntl`; it does not add Windows coverage. The Cursor integration is verified
+  at the protocol layer; a real Cursor session replay is a P7 evidence gap.

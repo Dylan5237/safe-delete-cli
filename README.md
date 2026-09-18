@@ -27,10 +27,21 @@ root do not appear in `list` under another. `list --json` echoes the resolved
 ## Platform
 
 Linux, macOS, and WSL are supported. Native Windows Python is not: the storage
-layer imports `fcntl` at import time, so on a native Windows interpreter every
-subcommand — including `version` — fails with
-`ModuleNotFoundError: No module named 'fcntl'`. That message means the wrong
-interpreter was used; run inside WSL with a POSIX `python3`.
+layer imports `fcntl` at import time, so the entry point preflights the platform
+before that import and fails with one line on stderr instead of an import
+traceback:
+
+```console
+$ python ./safe-delete version
+unsupported platform: requires Linux/macOS/WSL (fcntl)
+$ echo $?
+2
+```
+
+That message means the wrong interpreter was used; run inside WSL with a POSIX
+`python3`. It is a diagnosis, not a portability or coverage claim — nothing on
+the native Windows side is covered. `safe-delete doctor --json` reports the same
+facts as data under `platform_preflight`.
 
 For WSL/Windows path forms (`/home/...`, `/mnt/c/...`, `\\wsl$\...`) and what is
 actually covered, see [`docs/project/p7-agent-usage.md`](docs/project/p7-agent-usage.md).
@@ -44,10 +55,37 @@ per-invocation overrides `--older-than Nd`/`--older-than Nh` (for example
 `--execute` and `--yes`. Preview first and read `policy.source`, `policy.cutoff`,
 and `candidates` before adding the confirmation flags.
 
-`--before` accepts a future timestamp, and a future cutoff makes every active
-entry eligible — that is wipe-all semantics, not a typo guard. See
+`--before` also accepts the exact literal `now`, which resolves to the
+invocation's own UTC clock — the "everything eligible right now" spelling. It is
+sugar only: it never implies `--execute --yes`, and a report whose cutoff is not
+in the past carries an explicit wipe-all `warning`. `--before` accepts a future
+timestamp too, and a future cutoff likewise makes every active entry eligible —
+that is wipe-all semantics, not a typo guard. See
 [`docs/project/p7-agent-usage.md`](docs/project/p7-agent-usage.md) for the
 three-step purge discipline.
+
+## Doctor
+
+`safe-delete doctor --json` is a read-only aggregate: platform preflight,
+resolved storage root and usability, the same per-selector `hook status` entries
+(each carrying its own `out_of_coverage` verbatim), the payload source of every
+installed artifact, and the resolved CLI paths with a world-writable flag. It
+never writes, creates, or repairs. `needs_attention: false` means "no problem
+detected in the inspected surfaces" — it is not a coverage claim and not a
+statement that deletion is safe.
+
+## Hook install
+
+`safe-delete hook install <claude|cursor|path-shim>` writes package-owned
+payloads under the resolved data root and registers the selected boundary. On a
+stock machine — no `SAFE_DELETE_ROOT`, no `XDG_DATA_HOME` — the package root and
+the storage root are the same directory; that is supported, and only the runtime
+namespaces (`trash/`, `ledger.jsonl`, `locks/`) are refused. Installing from a
+second Cursor project without `--project`/`--config` fails closed rather than
+silently reporting success against the first project. Counterexample C — the
+payload is pinned to the checkout that installed it — is **not** fixed, but
+install and `doctor` both warn about it. See
+[`docs/project/p7-install-notes.md`](docs/project/p7-install-notes.md).
 
 ## Scheduled purge
 
@@ -73,6 +111,6 @@ does not install a scheduler.
 - [`docs/project/p7-agent-usage.md`](docs/project/p7-agent-usage.md) — agent
   usage, `--json` examples, purge discipline, and the bypass inventory.
 - [`docs/project/p7-install-notes.md`](docs/project/p7-install-notes.md) — hook
-  install restrictions and known limits.
+  install fixes, remaining limits, and the read-only `doctor` surface.
 - [`docs/project/p4-hook-coverage.md`](docs/project/p4-hook-coverage.md) — hook
   coverage replay map.
