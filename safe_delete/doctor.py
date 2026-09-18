@@ -8,6 +8,7 @@ or repairs anything:
 * ``hook status`` for every selector, carrying each boundary's
   ``out_of_coverage`` list verbatim;
 * the captured payload source of every *installed* package artifact;
+* whether an installed boundary's package file is still present and runnable;
 * the resolved CLI paths and whether a registered one is world-writable.
 
 What ``doctor`` must never claim.  Its scope is one registered
@@ -115,6 +116,31 @@ def run_doctor(root: str | None = None) -> dict[str, Any]:
     world_writable = [item for item in cli_paths if is_world_writable(Path(item))]
     if any(status.get("installed") for status in statuses) and world_writable:
         problems.extend(f"registered CLI is world-writable: {item}" for item in world_writable)
+
+    # A boundary can be *installed* while its package file is gone or no longer
+    # importable — a stale registry entry from a moved/deleted checkout, or an
+    # adapter deleted after install.  ``_artifact_paths`` skips missing files,
+    # so without this the aggregate would stay quiet about a registered
+    # integration whose payload cannot run.
+    for status in statuses:
+        if not status.get("installed"):
+            continue
+        package = status.get("package")
+        if not isinstance(package, Mapping):
+            continue
+        runnable = (
+            package.get("adapter_runnable")
+            if status.get("mode") == "pretooluse"
+            else package.get("complete")
+        )
+        if runnable is False:
+            selector = status.get("selector", "unknown")
+            problems.append(
+                f"installed hook payload is missing or not runnable at boundary {selector}: "
+                f"{package.get('adapter_path') or package.get('files')}; "
+                "every hook decision at this boundary fails closed"
+            )
+
     problems = list(dict.fromkeys(problems))
 
     return {

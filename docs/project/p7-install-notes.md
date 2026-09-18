@@ -237,6 +237,11 @@ creates, or repairs, and it does not initialize a storage root. It aggregates:
   own `out_of_coverage` list verbatim;
 - `artifacts` — the captured payload source of every *installed* package
   artifact, with `payload_source_exists` and `git_checkout`;
+- `problems` also covers an installed boundary whose package file is gone or no
+  longer importable (a stale registry entry from a moved checkout, or an adapter
+  deleted after install): `installed hook payload is missing or not runnable at
+  boundary <selector>: <path>; every hook decision at this boundary fails
+  closed`;
 - `cli` — the resolved CLI paths and which of them are world-writable;
 - `out_of_coverage` — the § 5 inventory, carried verbatim;
 - `scope` — `enforced applies only to a registered (host, config_path)

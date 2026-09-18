@@ -1898,6 +1898,32 @@ class DoctorTests(unittest.TestCase):
         hook_uninstall("claude", config=str(config), root=str(self.storage))
         self.assertFalse(run_doctor(str(self.storage))["needs_attention"])
 
+    def test_doctor_flags_installed_boundary_with_missing_payload(self) -> None:
+        from safe_delete.doctor import run_doctor
+        from safe_delete.hook import hook_install, hook_registry_path
+
+        self.assertEqual(run_cli(self.storage, "init")[0], 0)
+        config = self.base / "claude.json"
+        hook_install("claude", config=str(config), cli_path=str(CLI), root=str(self.storage))
+        self.assertTrue(run_doctor(str(self.storage))["artifacts"][0]["payload_source_exists"])
+
+        # Delete the installed adapter while leaving the registry entry in
+        # place: the boundary is still "installed" but nothing can run.
+        registry = json.loads(hook_registry_path().read_text(encoding="utf-8"))
+        adapter = Path(registry["integrations"]["claude"]["adapter_path"])
+        self.assertTrue(adapter.is_file(), adapter)
+        adapter.unlink()
+
+        report = run_doctor(str(self.storage))
+        status = next(item for item in report["boundaries"] if item["selector"] == "claude")
+        self.assertTrue(status["installed"])
+        self.assertFalse(status["enforced"])
+        self.assertEqual(report["artifacts"], [], "a missing file is not an artifact fact")
+        self.assertTrue(report["needs_attention"], report["problems"])
+        self.assertEqual(len(report["problems"]), 1, report["problems"])
+        self.assertIn("missing or not runnable at boundary claude", report["problems"][0])
+        self.assertIn("fails closed", report["problems"][0])
+
     def test_doctor_artifact_paths_are_derived_from_status(self) -> None:
         from safe_delete.doctor import _artifact_paths
 
