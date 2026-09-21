@@ -64,7 +64,9 @@ Rejected as a framing for this phase: "add an App", "make install automatic",
 
 - No GUI, desktop App, tray, dashboard, web viewer, or "App-level
   observability". `list --json` + `doctor --json` remain the observability
-  ceiling, exactly as `p7-adversarial-review.md` § 9 requires.
+  ceiling. (`p7-adversarial-review.md` § 9 literally named `list --json` +
+  `hook status --json` before `doctor` existed; P7 added `doctor --json` as
+  the aggregate read-only surface, and that is the ceiling P8 preserves.)
 - No change to the Exception #12 threat model, and no wording anywhere in P8
   that reads as "#12 fixed". See § 6.3 and § 4.4.
 - No native Windows Python runtime, no `msvcrt`/Win32 lock port, no attempt to
@@ -142,7 +144,7 @@ Human rendering, per command:
 | `doctor` | Sections for platform preflight, storage, boundaries, artifacts, and CLI paths; a `problems` list; the read-only statement; the verbatim Exception #12 residual line (§ 6.3); and the honest footer from § 4.5. |
 | `restore` | `entry_id`, resulting `state`, `original_path`, and effective `restore_path`; the verbatim Exception #12 residual line. |
 | `purge` preview | `mode`, the resolved policy source and cutoff, the candidate count and list, the mandatory wipe-all warning when applicable, and an explicit "nothing was removed" statement. |
-| `hook status` | One line per selector with `enforced`, `installed`, the boundary `config_path`, and the selector's own `warning`. |
+| `hook status` | One line per selector with `enforced`, `installed`, and the selector's own `warning`. For `claude`/`cursor`, show the boundary `config_path`; for `path-shim`, show `shim_dir` / `prepend_path` (path-shim's boundary has no `config_path`). |
 | `hook install` | The selector, the boundary `config_path`, `changed`, and every `install_warnings` entry. |
 
 Errors and warnings remain on **stderr**; exit categories remain the frozen
@@ -153,7 +155,7 @@ path within seconds (review § 12) is what the `list` row encodes.
 
 | Flag | Contract |
 | --- | --- |
-| `list --limit N` | `N` is a positive base-10 integer. Applied **after** all existing filters. Ordering is deterministic: newest event `timestamp` first, `entry_id` ascending as the tiebreak. Omitted `--limit` leaves the result set exactly as on `37f270e`. `--limit` applies to `--all` and `--orphans` as well. An invalid `N` is `usage_error`. |
+| `list --limit N` | `N` is a positive base-10 integer. Applied **after** all existing filters. When `--limit` is present the result is **re-sorted** (not merely truncated): newest lifecycle-event `timestamp` first (the latest event on the entry, not only the trash-anchor creation time), `entry_id` ascending as the tiebreak, then the first `N` rows. Omitted `--limit` leaves both the result set **and** the baseline ordering unchanged (`entry_id` ascending, as on `37f270e`). `--limit` applies to `--all` and `--orphans` as well. An invalid `N` is `usage_error`. |
 
 ### 3.2 `safe-delete empty` — safe reclaim wrapper
 
@@ -171,36 +173,72 @@ safe-delete empty --confirm TOKEN [--older-than DURATION | --before RFC3339] [--
 
 | Form | Contract |
 | --- | --- |
-| `empty` (no `--confirm`) | **Preview only.** Never removes anything, never appends a ledger event, never changes the ledger or payload bytes. Exit `0` on a clean read. It reports `mode: "preview"`, the resolved policy, `candidates`, `decisions`, a mandatory `warning` (§ below), and a `confirm_token`. |
-| `empty --confirm TOKEN` | Executes removal of exactly the candidate set that `TOKEN` commits to. Reports `mode: "execute"` and the same `outcomes`/`partial_failure` semantics as `purge --execute --yes`. |
+| `empty` (no `--confirm`) | **Preview only.** Never removes anything, never appends a ledger event, never changes the ledger or payload bytes. Exit `0` on a clean read. It reports `mode: "preview"`, the resolved policy, `candidates`, `decisions`, the wipe-all `warning` **when applicable** (§ below), and a `confirm_token`. |
+| `empty --confirm TOKEN` | Executes removal of exactly the candidate set that `TOKEN` commits to. Reports `mode: "execute"` and the same `outcomes`/`partial_failure` semantics as `purge --execute --yes`. Confirm MUST be invoked with the **same threshold flags** (or same absence of flags) as the preview that minted `TOKEN`; otherwise the recomputed candidate set diverges and the token mismatches. |
 
 **Eligibility default.** `empty` means *remove everything currently eligible*.
 With no threshold flag the cutoff is the invocation's own UTC clock — the
 documented `--before now` semantics — so every `active` entry is eligible. This
-is **wipe-all by design**, and both the preview and the execute invocation MUST
-carry the same mandatory warning field that `purge --before now` already emits:
-
-> `cutoff is not in the past: every active entry is eligible (wipe-all semantics); read candidates before extending this invocation with --execute --yes`
+is **wipe-all by design**. Unlike `purge`, which preserves the
+`--older-than`/`--before` → `SAFE_DELETE_RETENTION_DAYS` → 30d precedence
+(§ 4.1), **`empty` deliberately does not apply** `SAFE_DELETE_RETENTION_DAYS` or
+the 30-day default: with no threshold flag, `empty`'s policy source is always
+the invocation clock (`before_now`). Env/default retention therefore never
+narrows an `empty` run.
 
 Because `empty` is wipe-all by default, `safe-delete purge --execute --yes`
 remains the command for a retention-policy-scoped removal, and P8 documentation
 and skill text MUST say so. `empty` accepts `--older-than` / `--before` so a
 user can narrow it, but narrowing is an explicit act, not the default.
 
-**The confirmation token.** The preview emits `confirm_token`: the first 16
-lowercase hex characters of `SHA-256` over the canonical UTF-8 string
+**When the wipe-all `warning` is emitted.** `empty` reuses the same rule as
+`purge` (`purge.py`: emit only when `policy.cutoff >= policy.as_of`):
+
+- **Emitted** for the no-flag default (`before_now`, cutoff == as_of), for
+  `--before now`, and for any `--before` whose RFC3339 cutoff is ≥ the
+  invocation clock (future or equal).
+- **Not emitted** when the cutoff is strictly in the past — including a past
+  `--before RFC3339` and a typical `--older-than Nd` / `--older-than Nh`
+  threshold. Under those invocations the warning text would be false (not every
+  active entry is eligible), so the field MUST be absent.
+
+When emitted, the string is identical to purge's:
+
+> `cutoff is not in the past: every active entry is eligible (wipe-all semantics); read candidates before extending this invocation with --execute --yes`
+
+(For `empty`, read that as "before extending this invocation with `--confirm
+TOKEN`"; the verbatim purge string is kept so agents and tests share one
+sentinel.)
+
+**The confirmation token (D1 — option a).** The preview emits `confirm_token`:
+the first 16 lowercase hex characters of `SHA-256` over the canonical UTF-8
+string
 
 ```text
-safe-delete/empty/v1\n<root realpath>\n<resolved RFC3339 cutoff>\n<sorted candidate entry_ids joined by \n>
+safe-delete/empty/v1\n<root realpath>\n<sorted candidate entry_ids joined by \n>
 ```
 
-`empty --confirm TOKEN` recomputes the token from the current root, cutoff, and
-candidate set and compares. On mismatch the command fails closed with
-`usage_error`, exit category `2`, **no** `purge_intent`, and nothing removed.
-The token therefore binds the confirmation to a *specific* candidate set: an
-entry added, restored, purged, or aged across the cutoff between preview and
-confirm invalidates it. A stale or hand-edited token can never widen the blast
-radius.
+**Why the cutoff is omitted from the recipe.** The default (`before_now`) and
+`--older-than` cutoffs are clock-derived: a confirm invocation milliseconds
+later resolves a different RFC3339 cutoff than the preview. Binding that cutoff
+into the token would make the advertised default / `--older-than` flows fail
+closed 100% of the time, leaving only a fixed `--before RFC3339` workable —
+exactly the footgun G2 exists to break. Truncating cutoff granularity would
+make confirmation flaky rather than correct. So P8 freezes **option (a)**: drop
+the cutoff from the token. (Rejected alternative **(b)** — preview echoes its
+resolved cutoff and confirm requires `--before <that exact RFC3339>`, rejecting
+clock-derived thresholds — keeps the cutoff bound but adds moving parts and
+still forces operators off the default / `--older-than` paths.)
+
+`empty --confirm TOKEN` recomputes the token from the current root and the
+candidate set produced under the confirm invocation's threshold flags, then
+compares. On mismatch the command fails closed with `usage_error`, exit category
+`2`, **no** `purge_intent`, and nothing removed. The candidate set already binds
+eligibility: an entry added, restored, purged, or aged across an `--older-than`
+boundary between preview and confirm changes the recomputed set and still fails
+closed. A stale or hand-edited token can never widen the blast radius. Default
+and `--older-than` paths therefore work the same as a pinned `--before`: only
+the candidate membership matters.
 
 The token is honestly a **staleness check, not a secret**: like the ledger, it
 is readable and forgeable by a same-UID process. It is not an authentication
@@ -236,17 +274,20 @@ safe-delete setup                       # read-only: report selectors + state, m
 safe-delete setup <claude|cursor|path>  # install the named boundary, then run doctor
 ```
 
-`setup path` is the documented spelling of the existing `path-shim` selector;
-`path-shim` remains accepted, and the pre-existing `rm-shim` alias keeps
-working. No other selector spelling is introduced.
+`setup path` is a **setup-only** spelling of the existing `path-shim` selector;
+`path-shim` remains accepted by both `setup` and `hook install`, and the
+pre-existing `rm-shim` alias keeps working on `hook install`. `hook install`
+spellings are unchanged — P8 does not add `path` as a `hook install` selector.
+No further selector spelling is introduced beyond that setup-only alias.
 
 **Sequence, in order:**
 
 1. Platform preflight (the P7 `fcntl` / `O_NOFOLLOW` / `O_DIRECTORY` check). On
    failure, print the one-line `unsupported platform: requires Linux/macOS/WSL
    (fcntl)` message to stderr, exit `2`, and **install nothing**.
-2. `hook install <selector>` with the **unchanged** P7 semantics, including all
-   of its flags: `--config PATH`, `--project DIR`, `--cli PATH`, `--root DIR`.
+2. `hook install <selector>` with the **unchanged** P7 semantics, including its
+   flags: `--host`, `--config PATH`, `--project DIR`, `--cli PATH`, and the
+   global `--root DIR`.
 3. `doctor` (read-only), aggregated.
 4. A human summary: what was installed, the boundary `config_path`, every
    `install_warnings` entry, every `doctor` problem, and explicit next steps.
@@ -274,8 +315,10 @@ boundary, or uninstall the recorded integration first
 ```
 
 For `path`, `setup` prints the exact activation line and re-check command from
-the install result (`prepend_path`), and states plainly that PATH activation is
-operator-owned and that `path_precedence` reflects only the current process.
+the install result's `path_activation` field (the human sentence that tells the
+operator to prepend the shim directory; `boundary.prepend_path` is only that
+directory path), and states plainly that PATH activation is operator-owned and
+that `path_precedence` reflects only the current process.
 
 `setup --json` uses the frozen envelope: `command: "setup"`, `results` carries
 one object with `selector`, `preflight`, `install` (the unmodified install
@@ -309,7 +352,7 @@ skills/safe-delete/SKILL.md
   currently-shipped flags only. No flag may appear in the skill that is not
   accepted by the CLI version it is packaged with.
 - It MUST contain the P4 bypass inventory **verbatim** — the same ten entries,
-  in the same order and wording, as `hook.py`'s `OUT_OF_COVERAGE`,
+  in the same order and wording, as `hook.py`'s `OUT_OF_COVERAGE_BYPASSES`,
   `docs/project/p4-hook-coverage.md`, and `docs/project/p7-agent-usage.md` § 5.
   Drift between these copies is a P8 defect (§ 5, gate P8-8, § 6.5).
 - It MUST contain the purge discipline verbatim as its sentinel sentence:
@@ -386,8 +429,12 @@ unchanged. Each is a P8 acceptance gate in § 5.
   `doctor` human output always, and `restore` human output always; `list` and
   `show` human output whenever a displayed entry is in a restore-related state
   (`restored`, or a `show` of restore events).
-- The sentinel string, matching `evidence/p6`:
+- The sentinel string, matching `doctor.py` / `p7-agent-usage.md` § 3
+  (product residual disclosure):
   `Exception #12 — P2-only same-UID staging publication — excluded model / residual risk; not fixed`
+  (`evidence/p6/README.md` carries a related but differently-suffixed evidence
+  note — `… residual risk; not a product-contract fail.` — and is not the
+  product-output sentinel.)
 
 ### 4.5 Honesty invariants that P8 must not dilute
 
@@ -421,14 +468,14 @@ slice in § 7.3.
 
 | Gate | What it proves |
 | --- | --- |
-| **P8-1 — setup one-shot** | `setup claude --init --json` in a disposable `HOME` exits `0`; `results[0].install.ok` is `true`; `doctor` is present and read-only; the report contains no coverage claim. `setup cursor` succeeds from the intended project cwd. |
+| **P8-1 — setup one-shot** | `setup claude --init --json` in a disposable `HOME` exits `0`; envelope `ok` is `true`; `results[0].install` is the unmodified install result with `installed`/`enforced`/`changed` as on `37f270e` (there is no `install.ok` key — `ok` is envelope-level only); `doctor` is present and read-only; the report contains no coverage claim. `setup cursor` succeeds from the intended project cwd. |
 | **P8-2 — setup fail-closed and guidance** | With a Cursor boundary already registered for project A, `setup cursor` from project B exits `4` with `storage_failure`, prints the recorded **and** resolved config paths plus the uninstall-then-setup next step, and returns no `ok:true`. `setup` on an uninitialized root without `--init` creates nothing and prints the exact `safe-delete init` instruction. Simulated platform-preflight failure exits `2`, prints the one-line message, and installs nothing. |
-| **P8-3 — empty preview is inert** | With one aged and one young entry, `empty --json` reports `mode: "preview"`, lists only the aged candidate, carries the mandatory wipe-all `warning`, and carries a `confirm_token`. The ledger file hash and every payload byte are identical before and after. |
-| **P8-4 — empty confirm executes exactly the previewed set** | `empty --confirm <token>` from that preview removes the aged payload, leaves the young payload untouched, appends `purge_intent` then `purge_complete` for the aged entry, and reports `mode: "execute"`. A replayed `empty` then reports nothing eligible. |
-| **P8-5 — empty staleness and audit fail-closed** | A token minted before an extra `add` is rejected with `usage_error`, exit `2`, and no mutation. A wrong or malformed token is rejected identically. With an injected audit-corrupt ledger (malformed line / orphan payload), `empty --confirm` fails closed for the whole command with **no** `purge_intent`. `empty --execute` and `empty --yes` are usage errors, exit `2`. A removal failure produces `purge_failed` + `purge_remove_failed`, returns the entry to `active`, and reports `partial_failure` / exit `5`. |
+| **P8-3 — empty preview is inert (two invocations)** | Fixture: one aged and one young `active` entry (ages set via ledger timestamps, not wall-clock waits). **(a) wipe-all / warning path:** `empty --json` (no threshold flags) reports `mode: "preview"`, lists **both** entries as candidates, **carries** the wipe-all `warning` (`cutoff >= as_of`), and carries a `confirm_token`. **(b) selective / no-warning path:** `empty --before 2026-09-21T00:00:00Z --json` (fixed past RFC3339; substitute any fixture-stable past cutoff that includes the aged entry and excludes the young one) reports `mode: "preview"`, lists **only** the aged candidate, **omits** the wipe-all `warning` (cutoff is in the past), and carries a `confirm_token`. Both (a) and (b) leave the ledger file hash and every payload byte identical before and after. |
+| **P8-4 — empty confirm executes exactly the previewed set** | Using the selective preview from P8-3(b): `empty --confirm <token> --before 2026-09-21T00:00:00Z` (same pinned `--before` as the preview) removes the aged payload, leaves the young payload untouched, appends `purge_intent` then `purge_complete` for the aged entry, and reports `mode: "execute"`. A replayed `empty --before 2026-09-21T00:00:00Z` then reports nothing eligible. Separately, the default path must also round-trip: `empty --json` → `empty --confirm <token>` (no threshold flags on either side) removes every previewed candidate; this proves D1 option (a) — clock-derived cutoffs are not part of the token. |
+| **P8-5 — empty staleness and audit fail-closed** | Prefer the default (no-flag) path so the gate does not depend on a pinned `--before`: a token minted by `empty --json` before an extra `add` is rejected by `empty --confirm <stale>` with `usage_error`, exit `2`, and no mutation. A wrong or malformed token is rejected identically. With an injected audit-corrupt ledger (malformed line / orphan payload), `empty --confirm <token>` fails closed for the whole command with **no** `purge_intent`. `empty --execute` and `empty --yes` are usage errors, exit `2`. A removal failure produces `purge_failed` + `purge_remove_failed`, returns the entry to `active`, and reports `partial_failure` / exit `5`. Optionally repeat the stale-token case under `--older-than 30d` on both preview and confirm to prove the clock-relative path also fail-closes on set drift rather than on cutoff-string drift. |
 | **P8-6 — output modes** | Under a PTY, `list`, `doctor`, `show`, `restore`, and a `purge` preview print human text; `list` shows `entry_id` and `original_path`; `doctor` and `restore` contain the verbatim Exception #12 residual line. Under a pipe with neither flag, the same invocations emit the JSON envelope **byte-identical** to `--json`. `--json` on a PTY emits JSON. `--json --human` exits `2`. Audit errors still exit nonzero and are visible in human mode. |
 | **P8-7 — no contract drift** | The full pre-existing suite passes unchanged. The error-code vocabulary and exit categories are unchanged (`diff` of the code list). `purge --execute` without `--yes` still exits `2` with its original message; `--older-than 0d` and a timezone-less `--before` still exit `2`. `hook status`/`doctor` still carry the ten `out_of_coverage` entries verbatim. A `hook install` + `doctor` run leaves every root file's size and mtime unchanged except files `hook install` owns. Ledger bytes are unchanged by all read-only commands. |
-| **P8-8 — skill packaging** | `skills/safe-delete/SKILL.md` exists with valid frontmatter, contains no flag absent from `safe-delete <cmd> --help`, contains the ten bypass entries verbatim (asserted equal to `OUT_OF_COVERAGE`), contains the purge-discipline sentinel sentence and the Exception #12 sentinel, and contains no text teaching `--execute --yes` as an unconditional default. |
+| **P8-8 — skill packaging** | `skills/safe-delete/SKILL.md` exists with valid frontmatter, contains no flag absent from `safe-delete <cmd> --help`, contains the ten bypass entries verbatim (asserted equal to `OUT_OF_COVERAGE_BYPASSES`), contains the purge-discipline sentinel sentence and the Exception #12 sentinel, and contains no text teaching `--execute --yes` as an unconditional default. |
 
 A gate is only satisfied by an artifact a reviewer can replay without asking the
 author: the exact command sequence, the checkout SHA, the resolved root, the
@@ -444,10 +491,10 @@ excerpts, not narrative. Gate sequences and artifacts are owned by the later
 
 | Risk | Mitigation frozen here |
 | --- | --- |
-| `empty` becomes a friendlier-looking way to delete everything without reading anything. | `empty` previews unless `--confirm TOKEN` is present; there is no flag that both selects and executes; the mandatory wipe-all `warning` is present in both modes. |
-| The token is mistaken for a security control, or is reused across a changed candidate set. | The token is documented as a staleness check, not a secret; it is recomputed and compared; a mismatch fails closed with `usage_error` and no `purge_intent`. |
+| `empty` becomes a friendlier-looking way to delete everything without reading anything. | `empty` previews unless `--confirm TOKEN` is present; there is no flag that both selects and executes; the wipe-all `warning` is present in both preview and confirm **when** `cutoff >= as_of` (same rule as `purge`). |
+| The token is mistaken for a security control, or is reused across a changed candidate set. | The token is documented as a staleness check, not a secret; it binds root + sorted candidate `entry_id`s only (no clock-derived cutoff — D1 option a); it is recomputed and compared; a mismatch fails closed with `usage_error` and no `purge_intent`. |
 | Documentation or the agent skill teaches `--execute --yes` as muscle memory, producing systematic over-deletion. | P8 docs and the skill MUST teach preview → read → confirm, and the skill carries the verbatim sentinel `Never append --execute --yes as a default or habit.` Gate P8-8 asserts it. |
-| `empty`'s default cutoff (invocation clock) is quietly "everything", unlike `purge`'s 30-day default. | Stated explicitly in § 3.2 and in both help text and the skill; the `warning` field distinguishes it at runtime; P8-3 asserts the warning is present. |
+| `empty`'s default cutoff (invocation clock) is quietly "everything", unlike `purge`'s 30-day default. | Stated explicitly in § 3.2 (env/30d do not apply to `empty`) and in both help text and the skill; the `warning` field is emitted only when `cutoff >= as_of`; P8-3(a) asserts the warning on the no-flag path and P8-3(b) asserts its absence on a past `--before`. |
 | `empty` grows its own eligibility logic and forks the purge contract. | § 3.2 requires reuse of the frozen evaluator, lock, preflight, and events; P8-4 asserts the same `purge_intent`/`purge_complete` pair. |
 | A future `--before` timestamp remains a legal wipe-all in `purge`. | Unchanged from P7 and explicitly documented; P8 adds no prompt. The safe spelling (`preview first`) is the documented recipe. |
 
@@ -480,7 +527,7 @@ auto-repair behavior as grounds for `FREEZE RETURN`.
 ### 6.5 Skill drift and copy divergence
 
 The P4 bypass inventory now has several verbatim copies. P8 adds one more. Gate
-P8-8 asserts equality against `OUT_OF_COVERAGE`; the existing copies in
+P8-8 asserts equality against `OUT_OF_COVERAGE_BYPASSES`; the existing copies in
 `p4-hook-coverage.md` and `p7-agent-usage.md` are asserted in the same test so a
 future edit cannot silently soften one of them.
 
