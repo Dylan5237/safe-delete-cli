@@ -46,6 +46,11 @@ PATH_ACTIVATION_IS_OPERATOR_OWNED = (
     "PATH activation is operator-owned: prepend the shim directory yourself; "
     "path_precedence reports only the current process environment"
 )
+SETUP_INSTALL_IS_NOT_ENFORCEMENT = (
+    "an installed integration is not an enforced one: enforced=true means this one "
+    "registered (host, config_path) boundary is proven, never that a project is "
+    "covered"
+)
 UNRESOLVED_ROOT = "<root not resolved by this invocation>"
 
 _RESTORE_STATES = frozenset({"restored"})
@@ -400,6 +405,86 @@ def _render_hook_management(
     return _out(lines)
 
 
+def _render_setup(
+    results: Sequence[Any],
+    errors: Sequence[Mapping[str, Any]],
+    root: str | None,
+) -> str:
+    """Render the ``setup`` summary: install, boundary, doctor problems, steps."""
+
+    del errors, root
+    lines: list[str] = []
+    for item in results:
+        if not isinstance(item, Mapping):
+            lines.append(_encode(item))
+            continue
+        selector = item.get("selector")
+        lines.append(
+            "selector: " + (str(selector) if selector else "(none — read-only report)")
+        )
+        preflight = item.get("preflight")
+        if isinstance(preflight, Mapping):
+            state = "passed" if preflight.get("supported") else "failed"
+            lines.append(f"platform preflight: {preflight.get('requires')} — {state}")
+            missing = preflight.get("missing_primitives") or []
+            if missing:
+                lines.append(
+                    "  missing primitives: " + ", ".join(str(name) for name in missing)
+                )
+        initialized = item.get("initialized")
+        if isinstance(initialized, Mapping):
+            lines.append(f"initialized: {initialized.get('root')}")
+        install = item.get("install")
+        if isinstance(install, Mapping):
+            boundary = install.get("boundary")
+            boundary = boundary if isinstance(boundary, Mapping) else {}
+            lines.append(f"installed: {bool(install.get('installed'))}")
+            lines.append(f"enforced: {bool(install.get('enforced'))}")
+            lines.append(f"changed: {bool(install.get('changed'))}")
+            if boundary.get("config_path") is not None:
+                lines.append(f"config_path: {boundary.get('config_path')}")
+            if boundary.get("shim_dir") is not None:
+                lines.append(f"shim_dir: {boundary.get('shim_dir')}")
+                lines.append(f"prepend_path: {boundary.get('prepend_path')}")
+            warnings = list(install.get("install_warnings") or [])
+            if warnings:
+                lines.append("install_warnings:")
+                lines.extend(f"  - {warning}" for warning in warnings)
+            else:
+                lines.append("install_warnings: (none)")
+            if install.get("path_activation"):
+                lines.append(f"path_activation: {install.get('path_activation')}")
+                lines.append(PATH_ACTIVATION_IS_OPERATOR_OWNED)
+            lines.append(SETUP_INSTALL_IS_NOT_ENFORCEMENT)
+        else:
+            lines.append("installed: nothing (this was a read-only report)")
+        doctor = item.get("doctor")
+        if isinstance(doctor, Mapping):
+            for status in doctor.get("boundaries") or []:
+                if not isinstance(status, Mapping):
+                    continue
+                lines.append(
+                    f"boundary: {status.get('selector')} "
+                    f"installed={bool(status.get('installed'))} "
+                    f"enforced={bool(status.get('enforced'))}"
+                )
+            problems = list(doctor.get("problems") or [])
+            if problems:
+                lines.append("doctor problems:")
+                lines.extend(f"  - {problem}" for problem in problems)
+            else:
+                lines.append("doctor problems: (none detected)")
+            if doctor.get("needs_attention"):
+                lines.append("needs_attention: true — see the doctor problems above")
+            else:
+                lines.append(DOCTOR_HONEST_FOOTER)
+        steps = list(item.get("next_steps") or ())
+        if steps:
+            lines.append("next_steps:")
+            lines.extend(f"  - {step}" for step in steps)
+    return _out(lines)
+
+
 def _render_init(
     results: Sequence[Any],
     errors: Sequence[Mapping[str, Any]],
@@ -463,4 +548,5 @@ _RENDERERS = {
     "hook uninstall": _render_hook_management,
     "init": _render_init,
     "add": _render_add,
+    "setup": _render_setup,
 }

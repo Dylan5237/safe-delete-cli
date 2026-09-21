@@ -39,6 +39,8 @@ from .metadata import (
 )
 from .hook import hook_disable, hook_install, hook_status, hook_uninstall
 from .move import atomic_move
+from .platform_check import platform_report
+from .platform_check import preflight as platform_preflight
 from .purge import run_purge
 from .retention import RetentionPolicy, parse_rfc3339
 from .restore import restore_entry
@@ -120,6 +122,15 @@ def build_parser() -> argparse.ArgumentParser:
     purge_parser.add_argument("--yes", action="store_true")
     purge_parser.add_argument("--older-than")
     purge_parser.add_argument("--before")
+
+    setup_parser = commands.add_parser("setup")
+    _common_options(setup_parser)
+    setup_parser.add_argument("selector", nargs="?")
+    setup_parser.add_argument("--init", action="store_true")
+    setup_parser.add_argument("--host", dest="host_selector")
+    setup_parser.add_argument("--config")
+    setup_parser.add_argument("--project")
+    setup_parser.add_argument("--cli", dest="cli_path")
 
     hook_parser = commands.add_parser("hook")
     _common_options(hook_parser)
@@ -882,6 +893,157 @@ def _handle_purge(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteE
     return run_purge(layout, policy, execute=bool(args.execute))
 
 
+_SETUP_SELECTOR_ALIASES = {"path": "path-shim"}
+_SETUP_SELECTORS = frozenset({"claude", "cursor", "path", "path-shim"})
+def _setup_report(
+    selector: str | None,
+    preflight: Mapping[str, Any],
+    install: Any,
+    doctor: Any,
+    steps: list[str],
+    initialized: Any,
+) -> dict[str, Any]:
+    """The single ``setup`` results object, in the P8 freeze key order."""
+
+    return {
+        "selector": selector,
+        "preflight": dict(preflight),
+        "install": install,
+        "doctor": doctor,
+        "next_steps": list(steps),
+        # Additive to the frozen key list: a run that created a storage root
+        # must say so, because ``--init`` is the one mutation ``setup`` may make.
+        "initialized": initialized,
+    }
+
+
+def _with_next_steps(exc: SafeDeleteError, steps: list[str]) -> SafeDeleteError:
+    if not steps:
+        return exc
+    return SafeDeleteError(exc.code, exc.message, {**exc.details, "next_steps": list(steps)})
+
+
+def _install_failure_steps(exc: SafeDeleteError, selector: str | None) -> list[str]:
+    """Translate one install failure into the recorded/resolved next step."""
+
+    if (
+        exc.details.get("recorded_config_path") is not None
+        and exc.details.get("resolved_config_path") is not None
+    ):
+        # The registry keys a host by selector alone, so a second project for
+        # the same host is a fail-closed boundary mismatch.  ``setup`` never
+        # retargets it; it names the two commands that do resolve it.
+        return [
+            f"safe-delete hook uninstall {selector}   # from the recorded project",
+            f"safe-delete setup {selector}   # from the project you meant to protect",
+        ]
+    rerun = f"safe-delete setup {selector}" if selector else "safe-delete setup"
+    return [f"resolve the reported condition, then rerun: {rerun}"]
+
+
+def _setup_storage_next_step(root: str | None) -> str | None:
+    try:
+        require_layout(root)
+    except (SafeDeleteError, OSError):
+        # ``setup`` never initializes storage without the explicit --init
+        # opt-in; it names the deliberate command instead.
+        return "storage root is not initialized or is unusable; run: safe-delete init"
+    return None
+
+
+def _handle_setup(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
+    selector_arg = getattr(args, "selector", None)
+    host_selector = getattr(args, "host_selector", None)
+    if selector_arg is not None and host_selector is not None and selector_arg != host_selector:
+        return [], [error("usage_error", "setup selector and --host disagree")]
+    raw_selector = selector_arg or host_selector
+    selector: str | None = None
+    if raw_selector is not None:
+        normalized = str(raw_selector).strip().lower()
+        if normalized not in _SETUP_SELECTORS:
+            return [], [
+                error(
+                    "unsupported_command",
+                    f"unsupported setup selector: {raw_selector}",
+                    selector=raw_selector,
+                )
+            ]
+        selector = _SETUP_SELECTOR_ALIASES.get(normalized, normalized)
+
+    config = getattr(args, "config", None)
+    project = getattr(args, "project", None)
+    cli_path = getattr(args, "cli_path", None)
+    if selector is None:
+        # The read-only report form mutates nothing and takes no install flags.
+        if any(value is not None for value in (config, project, cli_path)):
+            return [], [
+                error(
+                    "usage_error",
+                    "setup --config/--project/--cli require a selector: claude, cursor, or path",
+                )
+            ]
+    preflight = platform_report()
+    steps: list[str] = []
+    errors: list[SafeDeleteError] = []
+    initialized: dict[str, Any] | None = None
+
+    if args.init:
+        try:
+            layout = initialize_layout(args.root)
+        except SafeDeleteError as exc:
+            errors.append(exc)
+        except OSError as exc:
+            errors.append(error("storage_failure", str(exc)))
+        else:
+            initialized = {"root": str(layout.root), "ledger": str(layout.ledger)}
+
+    install_result: dict[str, Any] | None = None
+    install_error: SafeDeleteError | None = None
+    if selector is not None and not errors:
+        try:
+            install_result = hook_install(
+                selector,
+                config=config,
+                project=project,
+                cli_path=cli_path,
+                root=args.root,
+            )
+        except SafeDeleteError as exc:
+            install_error = exc
+        except OSError as exc:
+            install_error = error("storage_failure", str(exc))
+
+    if install_error is not None:
+        # Failure honesty: the install's own category and code are propagated
+        # unchanged and no success wording is produced anywhere below.
+        steps.extend(_install_failure_steps(install_error, selector))
+        errors.append(_with_next_steps(install_error, steps))
+    elif install_result is not None:
+        if install_result.get("path_activation"):
+            steps.append(str(install_result["path_activation"]))
+            steps.append(PATH_ACTIVATION_IS_OPERATOR_OWNED)
+
+    storage_step = _setup_storage_next_step(args.root)
+    if storage_step is not None:
+        steps.insert(0, storage_step)
+
+    doctor_result = run_doctor(args.root)
+    if not errors:
+        if doctor_result.get("problems"):
+            steps.append(
+                "review the doctor problems above: a boundary with a problem fails closed"
+            )
+        if selector is None:
+            steps.append(
+                "install a boundary with: safe-delete setup claude | cursor | path"
+            )
+    report = _setup_report(selector, preflight, install_result, doctor_result, steps, initialized)
+    # The report travels with the envelope even on failure so a caller can see
+    # the preflight/doctor facts alongside the propagated error; ``ok`` stays
+    # false because ``errors`` is non-empty.
+    return [report], errors
+
+
 def _command_name(args: argparse.Namespace) -> str:
     if args.command == "hook" and getattr(args, "hook_command", None):
         return f"hook {args.hook_command}"
@@ -907,6 +1069,8 @@ def _dispatch(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError
         ], []
     if args.command == "purge":
         return _handle_purge(args)
+    if args.command == "setup":
+        return _handle_setup(args)
     if args.command == "hook":
         return _handle_hook(args)
     if args.command == "add":
@@ -920,7 +1084,7 @@ def _parse_error_command(raw_args: list[str]) -> str:
     for index, value in enumerate(raw_args):
         if value == "hook" and index + 1 < len(raw_args) and raw_args[index + 1] in {"install", "status", "disable", "uninstall"}:
             return f"hook {raw_args[index + 1]}"
-        if value in {"init", "add", "list", "show", "restore", "purge", "doctor", "version"}:
+        if value in {"init", "add", "list", "show", "restore", "purge", "doctor", "version", "setup"}:
             return value
     return "safe-delete"
 
@@ -961,6 +1125,14 @@ def main(argv: list[str] | None = None) -> int:
             [error("usage_error", "--json and --human are mutually exclusive")],
             True,
         )
+    if args.command == "setup":
+        # ``setup`` re-runs the platform preflight itself so a simulated
+        # failure is observable and installs nothing.  The one-line message and
+        # exit 2 match ``__main__``'s frozen platform behavior exactly.
+        blocked = platform_preflight(raw_args)
+        if blocked is not None:
+            return blocked
+
     # Auto mode: human only when a terminal is actually attached.  A pipe, a
     # redirect, a cron job, or a captured subprocess keeps the frozen JSON
     # envelope byte-for-byte.
