@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as _datetime
 import json
 import os
 import sys
@@ -19,6 +20,8 @@ from .errors import (
     error,
     exit_code_for,
 )
+from .human import PATH_ACTIVATION_IS_OPERATOR_OWNED
+from .human import render as render_human
 from .ledger import (
     append_event,
     build_trash_record,
@@ -37,7 +40,7 @@ from .metadata import (
 from .hook import hook_disable, hook_install, hook_status, hook_uninstall
 from .move import atomic_move
 from .purge import run_purge
-from .retention import RetentionPolicy
+from .retention import RetentionPolicy, parse_rfc3339
 from .restore import restore_entry
 from .storage import (
     ensure_safe_target,
@@ -53,6 +56,7 @@ from .storage import (
 def _common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, metavar="DIR")
     parser.add_argument("--json", dest="json", action="store_true", default=argparse.SUPPRESS)
+    parser.add_argument("--human", dest="human", action="store_true", default=argparse.SUPPRESS)
 
 
 class _SingleValueAction(argparse.Action):
@@ -73,7 +77,7 @@ class _SingleValueAction(argparse.Action):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="safe-delete")
-    parser.set_defaults(root=None, json=False)
+    parser.set_defaults(root=None, json=False, human=False)
     _common_options(parser)
     commands = parser.add_subparsers(dest="command")
 
@@ -97,6 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser.add_argument("--orphans", action="store_true")
     list_parser.add_argument("--project")
     list_parser.add_argument("--original")
+    list_parser.add_argument("--limit")
 
     show_parser = commands.add_parser("show")
     _common_options(show_parser)
@@ -146,12 +151,13 @@ def _envelope(command: str, results: list[Any], errors: list[SafeDeleteError]) -
     }
 
 
-def _print_human(envelope: dict[str, Any]) -> None:
-    for result in envelope["results"]:
-        if isinstance(result, str):
-            print(result)
-        else:
-            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+def _print_human(envelope: dict[str, Any], *, root: str | None = None) -> None:
+    command = str(envelope.get("command") or "")
+    text = render_human(command, envelope["results"], envelope["errors"], root=root)
+    if text:
+        sys.stdout.write(text)
+        if not text.endswith("\n"):
+            sys.stdout.write("\n")
     for item in envelope["errors"]:
         print(
             f"safe-delete: {item['code']}: {item['message']}",
@@ -172,14 +178,33 @@ def _print_human(envelope: dict[str, Any]) -> None:
                 source = item.get("source") or item.get("original_path") or "<not recorded>"
                 print(f"  source path: {source}", file=sys.stderr)
             print(f"  trash path: {trash}", file=sys.stderr)
+        for key, label in (
+            ("recorded_config_path", "recorded config"),
+            ("resolved_config_path", "resolved config"),
+        ):
+            if item.get(key) is not None:
+                print(f"  {label}: {item[key]}", file=sys.stderr)
+        steps = list(item.get("next_steps") or ())
+        for index, step in enumerate(steps):
+            # The first step is labelled; any further step is a continuation
+            # line, matching the freeze's guided-multi-project layout.
+            label = "  next: " if index == 0 else "        "
+            print(f"{label}{step}", file=sys.stderr)
 
 
-def _emit(command: str, results: list[Any], errors: list[SafeDeleteError], json_mode: bool) -> int:
+def _emit(
+    command: str,
+    results: list[Any],
+    errors: list[SafeDeleteError],
+    json_mode: bool,
+    *,
+    root: str | None = None,
+) -> int:
     envelope = _envelope(command, results, errors)
     if json_mode:
         print(json.dumps(envelope, ensure_ascii=False, separators=(",", ":")))
     else:
-        _print_human(envelope)
+        _print_human(envelope, root=root)
     return exit_code_for(errors)
 
 
@@ -345,7 +370,60 @@ def _handle_init(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteEr
     ], []
 
 
+_EPOCH = _datetime.datetime(1970, 1, 1, tzinfo=_datetime.timezone.utc)
+
+
+def _positive_limit(value: object, *, field_name: str) -> int:
+    """Parse the additive ``--limit`` as a positive base-10 integer."""
+
+    text = value if isinstance(value, str) else ""
+    if not text or not text.isdigit() or text.strip() != text:
+        raise error(
+            "usage_error",
+            f"{field_name} must be a positive base-10 integer",
+            value=value,
+        )
+    parsed = int(text, 10)
+    if parsed <= 0:
+        raise error(
+            "usage_error",
+            f"{field_name} must be a positive base-10 integer",
+            value=value,
+        )
+    return parsed
+
+
+def _latest_event_instant(entry: LedgerEntry) -> _datetime.datetime | None:
+    """Return the newest lifecycle-event instant recorded for one entry."""
+
+    best: _datetime.datetime | None = None
+    candidates: list[Any] = []
+    if entry.events:
+        candidates.append(entry.events[-1].get("timestamp"))
+    candidates.append(entry.creation.get("timestamp"))
+    for raw in candidates:
+        if not isinstance(raw, str):
+            continue
+        try:
+            parsed = parse_rfc3339(raw)
+        except SafeDeleteError:
+            continue
+        if best is None or parsed > best:
+            best = parsed
+    return best
+
+
+def _limit_sort_key(entry: LedgerEntry) -> tuple[int, _datetime.datetime]:
+    instant = _latest_event_instant(entry)
+    if instant is None:
+        return (0, _EPOCH)
+    return (1, instant)
+
+
 def _handle_list(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
+    limit = None
+    if getattr(args, "limit", None) is not None:
+        limit = _positive_limit(args.limit, field_name="--limit")
     layout = require_layout(args.root)
     project_filter = (
         normalized_path(args.project, field_name="project")
@@ -359,7 +437,7 @@ def _handle_list(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteEr
     )
     with ledger_lock(layout, exclusive=False):
         report = audit_layout(layout)
-    results: list[Any] = []
+    selected: list[tuple[str, Any, LedgerEntry]] = []
     if not args.orphans:
         for entry in sorted(report.entries.values(), key=lambda item: item.entry_id):
             if not args.all and entry.state != "active":
@@ -368,9 +446,16 @@ def _handle_list(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteEr
                 continue
             if original_filter is not None and entry.original_path != original_filter:
                 continue
-            results.append(_entry_result(entry))
+            selected.append((entry.entry_id, _entry_result(entry), entry))
+    if limit is not None:
+        # ``--limit`` is opt-in: it re-sorts by newest lifecycle event with an
+        # ``entry_id`` ascending tiebreak, then truncates.  The stable second
+        # pass keeps the tiebreak ascending while the first pass is descending.
+        selected.sort(key=lambda item: item[0])
+        selected.sort(key=lambda item: _limit_sort_key(item[2]), reverse=True)
+        selected = selected[:limit]
     audit_errors = _audit_errors_for_list(report)
-    return results, audit_errors
+    return [result for _, result, _ in selected], audit_errors
 
 
 def _handle_show(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
@@ -840,6 +925,15 @@ def _parse_error_command(raw_args: list[str]) -> str:
     return "safe-delete"
 
 
+def _resolved_root_label(root: str | None) -> str | None:
+    """Resolve the presentation-only root label without touching the filesystem."""
+
+    try:
+        return str(layout_for(root).root)
+    except (SafeDeleteError, OSError, TypeError, ValueError):
+        return None
+
+
 def main(argv: list[str] | None = None) -> int:
     raw_args = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
@@ -858,6 +952,20 @@ def main(argv: list[str] | None = None) -> int:
         return int(exc.code or EXIT_SUCCESS)
 
     command = _command_name(args)
+    human_requested = bool(getattr(args, "human", False))
+    explicit_json = bool(getattr(args, "json", False))
+    if human_requested and explicit_json:
+        return _emit(
+            command,
+            [],
+            [error("usage_error", "--json and --human are mutually exclusive")],
+            True,
+        )
+    # Auto mode: human only when a terminal is actually attached.  A pipe, a
+    # redirect, a cron job, or a captured subprocess keeps the frozen JSON
+    # envelope byte-for-byte.
+    human = human_requested or (not explicit_json and sys.stdout.isatty())
+    root_label = _resolved_root_label(args.root)
     try:
         results, errors = _dispatch(args)
     except SafeDeleteError as exc:
@@ -866,7 +974,7 @@ def main(argv: list[str] | None = None) -> int:
         results, errors = [], [error("usage_error", "value is too deeply nested")]
     except (OSError, TypeError, ValueError) as exc:
         results, errors = [], [error("storage_failure", str(exc))]
-    return _emit(command, results, errors, bool(args.json))
+    return _emit(command, results, errors, not human, root=root_label)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -1025,7 +1025,8 @@ class CliContractTests(unittest.TestCase):
         source = str(self.workspace / "source.txt")
         trash = str(self.storage / "trash" / "objects" / "id" / "payload")
         stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
+        stdout = io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(stdout):
             cli._emit(
                 "add",
                 [],
@@ -1359,7 +1360,8 @@ class CliContractTests(unittest.TestCase):
         with patch.object(restore, "append_event", side_effect=injected):
             results, errors = cli._handle_restore(args)
         stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
+        stdout = io.StringIO()
+        with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(stdout):
             code = cli._emit("restore", results, errors, False)
         self.assertEqual(code, 4)
         self.assertEqual(results, [])
