@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as _datetime
 import json
 import os
 import sys
@@ -19,6 +20,8 @@ from .errors import (
     error,
     exit_code_for,
 )
+from .human import PATH_ACTIVATION_IS_OPERATOR_OWNED
+from .human import render as render_human
 from .ledger import (
     append_event,
     build_trash_record,
@@ -36,8 +39,10 @@ from .metadata import (
 )
 from .hook import hook_disable, hook_install, hook_status, hook_uninstall
 from .move import atomic_move
-from .purge import run_purge
-from .retention import RetentionPolicy
+from .platform_check import platform_report
+from .platform_check import preflight as platform_preflight
+from .purge import run_empty, run_purge
+from .retention import RetentionPolicy, parse_rfc3339
 from .restore import restore_entry
 from .storage import (
     ensure_safe_target,
@@ -53,6 +58,7 @@ from .storage import (
 def _common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--root", dest="root", default=argparse.SUPPRESS, metavar="DIR")
     parser.add_argument("--json", dest="json", action="store_true", default=argparse.SUPPRESS)
+    parser.add_argument("--human", dest="human", action="store_true", default=argparse.SUPPRESS)
 
 
 class _SingleValueAction(argparse.Action):
@@ -73,7 +79,7 @@ class _SingleValueAction(argparse.Action):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="safe-delete")
-    parser.set_defaults(root=None, json=False)
+    parser.set_defaults(root=None, json=False, human=False)
     _common_options(parser)
     commands = parser.add_subparsers(dest="command")
 
@@ -97,6 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser.add_argument("--orphans", action="store_true")
     list_parser.add_argument("--project")
     list_parser.add_argument("--original")
+    list_parser.add_argument("--limit")
 
     show_parser = commands.add_parser("show")
     _common_options(show_parser)
@@ -115,6 +122,32 @@ def build_parser() -> argparse.ArgumentParser:
     purge_parser.add_argument("--yes", action="store_true")
     purge_parser.add_argument("--older-than")
     purge_parser.add_argument("--before")
+
+    setup_parser = commands.add_parser("setup")
+    _common_options(setup_parser)
+    setup_parser.add_argument("selector", nargs="?")
+    setup_parser.add_argument("--init", action="store_true")
+    setup_parser.add_argument("--host", dest="host_selector")
+    setup_parser.add_argument("--config")
+    setup_parser.add_argument("--project")
+    setup_parser.add_argument("--cli", dest="cli_path")
+
+    empty_parser = commands.add_parser("empty")
+    _common_options(empty_parser)
+    empty_parser.add_argument("--older-than")
+    empty_parser.add_argument("--before")
+    # ``empty`` deliberately has no --execute/--yes/--dry-run.  They stay
+    # declared but hidden so that passing one is an explicit, stable
+    # ``usage_error`` (exit 2) instead of argparse's generic text; see the P8
+    # contract § 3.2.
+    empty_parser.add_argument("--confirm", nargs="?", const="", default=None)
+    for rejected in ("--execute", "--yes", "--dry-run"):
+        empty_parser.add_argument(
+            rejected,
+            dest=rejected.lstrip("-").replace("-", "_"),
+            action="store_true",
+            help=argparse.SUPPRESS,
+        )
 
     hook_parser = commands.add_parser("hook")
     _common_options(hook_parser)
@@ -146,12 +179,13 @@ def _envelope(command: str, results: list[Any], errors: list[SafeDeleteError]) -
     }
 
 
-def _print_human(envelope: dict[str, Any]) -> None:
-    for result in envelope["results"]:
-        if isinstance(result, str):
-            print(result)
-        else:
-            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+def _print_human(envelope: dict[str, Any], *, root: str | None = None) -> None:
+    command = str(envelope.get("command") or "")
+    text = render_human(command, envelope["results"], envelope["errors"], root=root)
+    if text:
+        sys.stdout.write(text)
+        if not text.endswith("\n"):
+            sys.stdout.write("\n")
     for item in envelope["errors"]:
         print(
             f"safe-delete: {item['code']}: {item['message']}",
@@ -172,14 +206,33 @@ def _print_human(envelope: dict[str, Any]) -> None:
                 source = item.get("source") or item.get("original_path") or "<not recorded>"
                 print(f"  source path: {source}", file=sys.stderr)
             print(f"  trash path: {trash}", file=sys.stderr)
+        for key, label in (
+            ("recorded_config_path", "recorded config"),
+            ("resolved_config_path", "resolved config"),
+        ):
+            if item.get(key) is not None:
+                print(f"  {label}: {item[key]}", file=sys.stderr)
+        steps = list(item.get("next_steps") or ())
+        for index, step in enumerate(steps):
+            # The first step is labelled; any further step is a continuation
+            # line, matching the freeze's guided-multi-project layout.
+            label = "  next: " if index == 0 else "        "
+            print(f"{label}{step}", file=sys.stderr)
 
 
-def _emit(command: str, results: list[Any], errors: list[SafeDeleteError], json_mode: bool) -> int:
+def _emit(
+    command: str,
+    results: list[Any],
+    errors: list[SafeDeleteError],
+    json_mode: bool,
+    *,
+    root: str | None = None,
+) -> int:
     envelope = _envelope(command, results, errors)
     if json_mode:
         print(json.dumps(envelope, ensure_ascii=False, separators=(",", ":")))
     else:
-        _print_human(envelope)
+        _print_human(envelope, root=root)
     return exit_code_for(errors)
 
 
@@ -345,7 +398,60 @@ def _handle_init(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteEr
     ], []
 
 
+_EPOCH = _datetime.datetime(1970, 1, 1, tzinfo=_datetime.timezone.utc)
+
+
+def _positive_limit(value: object, *, field_name: str) -> int:
+    """Parse the additive ``--limit`` as a positive base-10 integer."""
+
+    text = value if isinstance(value, str) else ""
+    if not text or not text.isdigit() or text.strip() != text:
+        raise error(
+            "usage_error",
+            f"{field_name} must be a positive base-10 integer",
+            value=value,
+        )
+    parsed = int(text, 10)
+    if parsed <= 0:
+        raise error(
+            "usage_error",
+            f"{field_name} must be a positive base-10 integer",
+            value=value,
+        )
+    return parsed
+
+
+def _latest_event_instant(entry: LedgerEntry) -> _datetime.datetime | None:
+    """Return the newest lifecycle-event instant recorded for one entry."""
+
+    best: _datetime.datetime | None = None
+    candidates: list[Any] = []
+    if entry.events:
+        candidates.append(entry.events[-1].get("timestamp"))
+    candidates.append(entry.creation.get("timestamp"))
+    for raw in candidates:
+        if not isinstance(raw, str):
+            continue
+        try:
+            parsed = parse_rfc3339(raw)
+        except SafeDeleteError:
+            continue
+        if best is None or parsed > best:
+            best = parsed
+    return best
+
+
+def _limit_sort_key(entry: LedgerEntry) -> tuple[int, _datetime.datetime]:
+    instant = _latest_event_instant(entry)
+    if instant is None:
+        return (0, _EPOCH)
+    return (1, instant)
+
+
 def _handle_list(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
+    limit = None
+    if getattr(args, "limit", None) is not None:
+        limit = _positive_limit(args.limit, field_name="--limit")
     layout = require_layout(args.root)
     project_filter = (
         normalized_path(args.project, field_name="project")
@@ -359,7 +465,7 @@ def _handle_list(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteEr
     )
     with ledger_lock(layout, exclusive=False):
         report = audit_layout(layout)
-    results: list[Any] = []
+    selected: list[tuple[str, Any, LedgerEntry]] = []
     if not args.orphans:
         for entry in sorted(report.entries.values(), key=lambda item: item.entry_id):
             if not args.all and entry.state != "active":
@@ -368,9 +474,16 @@ def _handle_list(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteEr
                 continue
             if original_filter is not None and entry.original_path != original_filter:
                 continue
-            results.append(_entry_result(entry))
+            selected.append((entry.entry_id, _entry_result(entry), entry))
+    if limit is not None:
+        # ``--limit`` is opt-in: it re-sorts by newest lifecycle event with an
+        # ``entry_id`` ascending tiebreak, then truncates.  The stable second
+        # pass keeps the tiebreak ascending while the first pass is descending.
+        selected.sort(key=lambda item: item[0])
+        selected.sort(key=lambda item: _limit_sort_key(item[2]), reverse=True)
+        selected = selected[:limit]
     audit_errors = _audit_errors_for_list(report)
-    return results, audit_errors
+    return [result for _, result, _ in selected], audit_errors
 
 
 def _handle_show(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
@@ -797,6 +910,195 @@ def _handle_purge(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteE
     return run_purge(layout, policy, execute=bool(args.execute))
 
 
+_SETUP_SELECTOR_ALIASES = {"path": "path-shim"}
+_SETUP_SELECTORS = frozenset({"claude", "cursor", "path", "path-shim"})
+_EMPTY_REJECTED_FLAGS = (
+    ("--execute", "execute"),
+    ("--yes", "yes"),
+    ("--dry-run", "dry_run"),
+)
+
+
+def _setup_report(
+    selector: str | None,
+    preflight: Mapping[str, Any],
+    install: Any,
+    doctor: Any,
+    steps: list[str],
+    initialized: Any,
+) -> dict[str, Any]:
+    """The single ``setup`` results object, in the P8 freeze key order."""
+
+    return {
+        "selector": selector,
+        "preflight": dict(preflight),
+        "install": install,
+        "doctor": doctor,
+        "next_steps": list(steps),
+        # Additive to the frozen key list: a run that created a storage root
+        # must say so, because ``--init`` is the one mutation ``setup`` may make.
+        "initialized": initialized,
+    }
+
+
+def _with_next_steps(exc: SafeDeleteError, steps: list[str]) -> SafeDeleteError:
+    if not steps:
+        return exc
+    return SafeDeleteError(exc.code, exc.message, {**exc.details, "next_steps": list(steps)})
+
+
+def _install_failure_steps(exc: SafeDeleteError, selector: str | None) -> list[str]:
+    """Translate one install failure into the recorded/resolved next step."""
+
+    if (
+        exc.details.get("recorded_config_path") is not None
+        and exc.details.get("resolved_config_path") is not None
+    ):
+        # The registry keys a host by selector alone, so a second project for
+        # the same host is a fail-closed boundary mismatch.  ``setup`` never
+        # retargets it; it names the two commands that do resolve it.
+        return [
+            f"safe-delete hook uninstall {selector}   # from the recorded project",
+            f"safe-delete setup {selector}   # from the project you meant to protect",
+        ]
+    rerun = f"safe-delete setup {selector}" if selector else "safe-delete setup"
+    return [f"resolve the reported condition, then rerun: {rerun}"]
+
+
+def _setup_storage_next_step(root: str | None) -> str | None:
+    try:
+        require_layout(root)
+    except (SafeDeleteError, OSError):
+        # ``setup`` never initializes storage without the explicit --init
+        # opt-in; it names the deliberate command instead.
+        return "storage root is not initialized or is unusable; run: safe-delete init"
+    return None
+
+
+def _handle_setup(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
+    selector_arg = getattr(args, "selector", None)
+    host_selector = getattr(args, "host_selector", None)
+    if selector_arg is not None and host_selector is not None and selector_arg != host_selector:
+        return [], [error("usage_error", "setup selector and --host disagree")]
+    raw_selector = selector_arg or host_selector
+    selector: str | None = None
+    if raw_selector is not None:
+        normalized = str(raw_selector).strip().lower()
+        if normalized not in _SETUP_SELECTORS:
+            return [], [
+                error(
+                    "unsupported_command",
+                    f"unsupported setup selector: {raw_selector}",
+                    selector=raw_selector,
+                )
+            ]
+        selector = _SETUP_SELECTOR_ALIASES.get(normalized, normalized)
+
+    config = getattr(args, "config", None)
+    project = getattr(args, "project", None)
+    cli_path = getattr(args, "cli_path", None)
+    if selector is None:
+        # The read-only report form mutates nothing and takes no install flags.
+        if any(value is not None for value in (config, project, cli_path)):
+            return [], [
+                error(
+                    "usage_error",
+                    "setup --config/--project/--cli require a selector: claude, cursor, or path",
+                )
+            ]
+    preflight = platform_report()
+    steps: list[str] = []
+    errors: list[SafeDeleteError] = []
+    initialized: dict[str, Any] | None = None
+
+    if args.init:
+        try:
+            layout = initialize_layout(args.root)
+        except SafeDeleteError as exc:
+            errors.append(exc)
+        except OSError as exc:
+            errors.append(error("storage_failure", str(exc)))
+        else:
+            initialized = {"root": str(layout.root), "ledger": str(layout.ledger)}
+
+    install_result: dict[str, Any] | None = None
+    install_error: SafeDeleteError | None = None
+    if selector is not None and not errors:
+        try:
+            install_result = hook_install(
+                selector,
+                config=config,
+                project=project,
+                cli_path=cli_path,
+                root=args.root,
+            )
+        except SafeDeleteError as exc:
+            install_error = exc
+        except OSError as exc:
+            install_error = error("storage_failure", str(exc))
+
+    if install_error is not None:
+        # Failure honesty: the install's own category and code are propagated
+        # unchanged and no success wording is produced anywhere below.
+        steps.extend(_install_failure_steps(install_error, selector))
+        errors.append(_with_next_steps(install_error, steps))
+    elif install_result is not None:
+        if install_result.get("path_activation"):
+            steps.append(str(install_result["path_activation"]))
+            steps.append(PATH_ACTIVATION_IS_OPERATOR_OWNED)
+
+    storage_step = _setup_storage_next_step(args.root)
+    if storage_step is not None:
+        steps.insert(0, storage_step)
+
+    doctor_result = run_doctor(args.root)
+    if not errors:
+        if doctor_result.get("problems"):
+            steps.append(
+                "review the doctor problems above: a boundary with a problem fails closed"
+            )
+        if selector is None:
+            steps.append(
+                "install a boundary with: safe-delete setup claude | cursor | path"
+            )
+    report = _setup_report(selector, preflight, install_result, doctor_result, steps, initialized)
+    # The report travels with the envelope even on failure so a caller can see
+    # the preflight/doctor facts alongside the propagated error; ``ok`` stays
+    # false because ``errors`` is non-empty.
+    return [report], errors
+
+
+def _handle_empty(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
+    rejected = [name for name, dest in _EMPTY_REJECTED_FLAGS if getattr(args, dest, False)]
+    if rejected:
+        return [], [
+            error(
+                "usage_error",
+                "empty does not accept "
+                + " or ".join(rejected)
+                + "; run `safe-delete empty` to preview and confirm with --confirm TOKEN",
+            )
+        ]
+    if args.older_than is not None and args.before is not None:
+        return [], [error("usage_error", "--older-than and --before are mutually exclusive")]
+    confirm_token = getattr(args, "confirm", None)
+    if confirm_token is not None and confirm_token == "":
+        return [], [
+            error("usage_error", "empty --confirm requires the token printed by a preview")
+        ]
+    # ``empty`` deliberately skips the environment/30-day default: with no
+    # threshold flag the cutoff is this invocation's clock (``before_now``),
+    # so env/default retention never narrows an ``empty`` run.  An explicit
+    # threshold flag is passed through unchanged and alone, because ``purge``'s
+    # frozen resolver rejects ``--older-than`` together with ``--before``.
+    if args.older_than is not None:
+        policy = RetentionPolicy.resolve(older_than=args.older_than)
+    else:
+        policy = RetentionPolicy.resolve(before="now" if args.before is None else args.before)
+    layout = require_layout(args.root)
+    return run_empty(layout, policy, confirm_token=confirm_token)
+
+
 def _command_name(args: argparse.Namespace) -> str:
     if args.command == "hook" and getattr(args, "hook_command", None):
         return f"hook {args.hook_command}"
@@ -822,6 +1124,10 @@ def _dispatch(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError
         ], []
     if args.command == "purge":
         return _handle_purge(args)
+    if args.command == "setup":
+        return _handle_setup(args)
+    if args.command == "empty":
+        return _handle_empty(args)
     if args.command == "hook":
         return _handle_hook(args)
     if args.command == "add":
@@ -835,9 +1141,18 @@ def _parse_error_command(raw_args: list[str]) -> str:
     for index, value in enumerate(raw_args):
         if value == "hook" and index + 1 < len(raw_args) and raw_args[index + 1] in {"install", "status", "disable", "uninstall"}:
             return f"hook {raw_args[index + 1]}"
-        if value in {"init", "add", "list", "show", "restore", "purge", "doctor", "version"}:
+        if value in {"init", "add", "list", "show", "restore", "purge", "doctor", "version", "setup", "empty"}:
             return value
     return "safe-delete"
+
+
+def _resolved_root_label(root: str | None) -> str | None:
+    """Resolve the presentation-only root label without touching the filesystem."""
+
+    try:
+        return str(layout_for(root).root)
+    except (SafeDeleteError, OSError, TypeError, ValueError):
+        return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -858,6 +1173,28 @@ def main(argv: list[str] | None = None) -> int:
         return int(exc.code or EXIT_SUCCESS)
 
     command = _command_name(args)
+    human_requested = bool(getattr(args, "human", False))
+    explicit_json = bool(getattr(args, "json", False))
+    if human_requested and explicit_json:
+        return _emit(
+            command,
+            [],
+            [error("usage_error", "--json and --human are mutually exclusive")],
+            True,
+        )
+    if args.command == "setup":
+        # ``setup`` re-runs the platform preflight itself so a simulated
+        # failure is observable and installs nothing.  The one-line message and
+        # exit 2 match ``__main__``'s frozen platform behavior exactly.
+        blocked = platform_preflight(raw_args)
+        if blocked is not None:
+            return blocked
+
+    # Auto mode: human only when a terminal is actually attached.  A pipe, a
+    # redirect, a cron job, or a captured subprocess keeps the frozen JSON
+    # envelope byte-for-byte.
+    human = human_requested or (not explicit_json and sys.stdout.isatty())
+    root_label = _resolved_root_label(args.root)
     try:
         results, errors = _dispatch(args)
     except SafeDeleteError as exc:
@@ -866,7 +1203,7 @@ def main(argv: list[str] | None = None) -> int:
         results, errors = [], [error("usage_error", "value is too deeply nested")]
     except (OSError, TypeError, ValueError) as exc:
         results, errors = [], [error("storage_failure", str(exc))]
-    return _emit(command, results, errors, bool(args.json))
+    return _emit(command, results, errors, not human, root=root_label)
 
 
 if __name__ == "__main__":  # pragma: no cover
