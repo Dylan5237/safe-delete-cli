@@ -42,6 +42,10 @@ PURGE_PREVIEW_NOTHING_REMOVED = (
     "nothing was removed: this was a preview (purge removes payloads only "
     "under --execute --yes)"
 )
+EMPTY_PREVIEW_NOTHING_REMOVED = (
+    "nothing was removed: this was a preview; confirm the candidates above "
+    "with --confirm <confirm_token> to remove exactly this set"
+)
 PATH_ACTIVATION_IS_OPERATOR_OWNED = (
     "PATH activation is operator-owned: prepend the shim directory yourself; "
     "path_precedence reports only the current process environment"
@@ -327,6 +331,21 @@ def _render_purge(
     return _out(lines)
 
 
+def _render_empty(
+    results: Sequence[Any],
+    errors: Sequence[Mapping[str, Any]],
+    root: str | None,
+) -> str:
+    del errors
+    lines = [_root_line(root)]
+    for item in results:
+        if isinstance(item, Mapping):
+            lines.extend(_render_purge_report(item, nothing_removed=EMPTY_PREVIEW_NOTHING_REMOVED))
+        else:
+            lines.append(_encode(item))
+    return _out(lines)
+
+
 def _render_hook_status(
     results: Sequence[Any],
     errors: Sequence[Mapping[str, Any]],
@@ -542,6 +561,7 @@ _RENDERERS = {
     "doctor": _render_doctor,
     "restore": _render_restore,
     "purge": _render_purge,
+    "empty": _render_empty,
     "hook status": _render_hook_status,
     "hook install": _render_hook_install,
     "hook disable": _render_hook_management,

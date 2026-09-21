@@ -41,7 +41,7 @@ from .hook import hook_disable, hook_install, hook_status, hook_uninstall
 from .move import atomic_move
 from .platform_check import platform_report
 from .platform_check import preflight as platform_preflight
-from .purge import run_purge
+from .purge import run_empty, run_purge
 from .retention import RetentionPolicy, parse_rfc3339
 from .restore import restore_entry
 from .storage import (
@@ -131,6 +131,23 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--config")
     setup_parser.add_argument("--project")
     setup_parser.add_argument("--cli", dest="cli_path")
+
+    empty_parser = commands.add_parser("empty")
+    _common_options(empty_parser)
+    empty_parser.add_argument("--older-than")
+    empty_parser.add_argument("--before")
+    # ``empty`` deliberately has no --execute/--yes/--dry-run.  They stay
+    # declared but hidden so that passing one is an explicit, stable
+    # ``usage_error`` (exit 2) instead of argparse's generic text; see the P8
+    # contract § 3.2.
+    empty_parser.add_argument("--confirm", nargs="?", const="", default=None)
+    for rejected in ("--execute", "--yes", "--dry-run"):
+        empty_parser.add_argument(
+            rejected,
+            dest=rejected.lstrip("-").replace("-", "_"),
+            action="store_true",
+            help=argparse.SUPPRESS,
+        )
 
     hook_parser = commands.add_parser("hook")
     _common_options(hook_parser)
@@ -895,6 +912,13 @@ def _handle_purge(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteE
 
 _SETUP_SELECTOR_ALIASES = {"path": "path-shim"}
 _SETUP_SELECTORS = frozenset({"claude", "cursor", "path", "path-shim"})
+_EMPTY_REJECTED_FLAGS = (
+    ("--execute", "execute"),
+    ("--yes", "yes"),
+    ("--dry-run", "dry_run"),
+)
+
+
 def _setup_report(
     selector: str | None,
     preflight: Mapping[str, Any],
@@ -1044,6 +1068,37 @@ def _handle_setup(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteE
     return [report], errors
 
 
+def _handle_empty(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError]]:
+    rejected = [name for name, dest in _EMPTY_REJECTED_FLAGS if getattr(args, dest, False)]
+    if rejected:
+        return [], [
+            error(
+                "usage_error",
+                "empty does not accept "
+                + " or ".join(rejected)
+                + "; run `safe-delete empty` to preview and confirm with --confirm TOKEN",
+            )
+        ]
+    if args.older_than is not None and args.before is not None:
+        return [], [error("usage_error", "--older-than and --before are mutually exclusive")]
+    confirm_token = getattr(args, "confirm", None)
+    if confirm_token is not None and confirm_token == "":
+        return [], [
+            error("usage_error", "empty --confirm requires the token printed by a preview")
+        ]
+    # ``empty`` deliberately skips the environment/30-day default: with no
+    # threshold flag the cutoff is this invocation's clock (``before_now``),
+    # so env/default retention never narrows an ``empty`` run.  An explicit
+    # threshold flag is passed through unchanged and alone, because ``purge``'s
+    # frozen resolver rejects ``--older-than`` together with ``--before``.
+    if args.older_than is not None:
+        policy = RetentionPolicy.resolve(older_than=args.older_than)
+    else:
+        policy = RetentionPolicy.resolve(before="now" if args.before is None else args.before)
+    layout = require_layout(args.root)
+    return run_empty(layout, policy, confirm_token=confirm_token)
+
+
 def _command_name(args: argparse.Namespace) -> str:
     if args.command == "hook" and getattr(args, "hook_command", None):
         return f"hook {args.hook_command}"
@@ -1071,6 +1126,8 @@ def _dispatch(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteError
         return _handle_purge(args)
     if args.command == "setup":
         return _handle_setup(args)
+    if args.command == "empty":
+        return _handle_empty(args)
     if args.command == "hook":
         return _handle_hook(args)
     if args.command == "add":
@@ -1084,7 +1141,7 @@ def _parse_error_command(raw_args: list[str]) -> str:
     for index, value in enumerate(raw_args):
         if value == "hook" and index + 1 < len(raw_args) and raw_args[index + 1] in {"install", "status", "disable", "uninstall"}:
             return f"hook {raw_args[index + 1]}"
-        if value in {"init", "add", "list", "show", "restore", "purge", "doctor", "version", "setup"}:
+        if value in {"init", "add", "list", "show", "restore", "purge", "doctor", "version", "setup", "empty"}:
             return value
     return "safe-delete"
 

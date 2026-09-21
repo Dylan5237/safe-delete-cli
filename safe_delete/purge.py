@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -639,3 +641,103 @@ def run_purge(
 
     with ledger_lock(layout, exclusive=True):
         return _run_locked(layout, policy, execute=execute)
+
+
+EMPTY_TOKEN_PREFIX = "safe-delete/empty/v1"
+_EMPTY_TOKEN_LENGTH = 16
+
+
+def empty_confirm_token(root: str | os.PathLike[str], entry_ids: Sequence[str]) -> str:
+    """Return the P8 ``empty`` confirmation token for one candidate set.
+
+    The token is the first 16 lowercase hex characters of SHA-256 over the
+    canonical UTF-8 recipe ``safe-delete/empty/v1\\n<root>\\n<ids>``.  It binds
+    the resolved root and the sorted candidate ``entry_id`` set only: the
+    cutoff is deliberately excluded, because the default (``before_now``) and
+    ``--older-than`` cutoffs are clock-derived and would otherwise make the
+    advertised flows fail closed every time.
+
+    It is honestly a **staleness check, not a secret**: like the ledger it is
+    readable and forgeable by a same-UID process, and it is not an
+    authentication boundary.
+    """
+
+    recipe = "\n".join([EMPTY_TOKEN_PREFIX, str(root), *sorted(entry_ids)])
+    return hashlib.sha256(recipe.encode("utf-8")).hexdigest()[:_EMPTY_TOKEN_LENGTH]
+
+
+def _empty_projection(
+    *,
+    policy: RetentionPolicy,
+    decisions: list[dict[str, Any]],
+    candidates: list[str],
+    outcomes: list[dict[str, Any]],
+    token: str | None = None,
+) -> dict[str, Any]:
+    """Report one ``empty`` preview in the frozen purge report shape."""
+
+    report = _report_projection(
+        policy=policy,
+        execute=False,
+        decisions=decisions,
+        candidates=candidates,
+        outcomes=outcomes,
+    )
+    report["mode"] = "preview"
+    if token is not None:
+        report["confirm_token"] = token
+    return report
+
+
+def run_empty(
+    layout: Layout,
+    policy: RetentionPolicy,
+    *,
+    confirm_token: str | None = None,
+) -> tuple[list[dict[str, Any]], list[SafeDeleteError]]:
+    """Preview or confirm one ``empty`` invocation over the frozen engine.
+
+    ``empty`` adds no eligibility path, no event type, and no shortcut around
+    the intent record: it reuses :func:`_audit_decisions` and :func:`_run_locked`
+    unchanged.  Without ``confirm_token`` it is a preview that writes nothing.
+    With one, the token is recomputed and compared **inside the same exclusive
+    ledger lock that performs the removal**, so a caller cannot widen the
+    blast radius between the check and the execution.
+    """
+
+    with ledger_lock(layout, exclusive=True):
+        report = audit_layout(layout)
+        decisions, candidate_entries, outcomes = _audit_decisions(
+            report,
+            policy,
+            audit_error=bool(report.errors),
+        )
+        candidate_ids = sorted(entry.entry_id for entry in candidate_entries)
+        if report.errors:
+            return [
+                _empty_projection(
+                    policy=policy,
+                    decisions=decisions,
+                    candidates=[],
+                    outcomes=[],
+                )
+            ], list(report.errors)
+        expected = empty_confirm_token(layout.root, candidate_ids)
+        if confirm_token is None:
+            return [
+                _empty_projection(
+                    policy=policy,
+                    decisions=decisions,
+                    candidates=candidate_ids,
+                    outcomes=outcomes,
+                    token=expected,
+                )
+            ], []
+        if confirm_token != expected:
+            raise error(
+                "usage_error",
+                "empty --confirm token does not match the current candidate set; "
+                "nothing was removed. Run `safe-delete empty` again and confirm the "
+                "token it prints",
+            )
+        return _run_locked(layout, policy, execute=True)
