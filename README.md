@@ -76,7 +76,7 @@ statement that deletion is safe.
 
 ## Hook install
 
-`safe-delete hook install <claude|cursor|path-shim>` writes package-owned
+`safe-delete hook install <claude|cursor|path-shim|workbuddy>` writes package-owned
 payloads under the resolved data root and registers the selected boundary. On a
 stock machine — no `SAFE_DELETE_ROOT`, no `XDG_DATA_HOME` — the package root and
 the storage root are the same directory; that is supported, and only the runtime

@@ -911,7 +911,7 @@ def _handle_purge(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteE
 
 
 _SETUP_SELECTOR_ALIASES = {"path": "path-shim"}
-_SETUP_SELECTORS = frozenset({"claude", "cursor", "path", "path-shim"})
+_SETUP_SELECTORS = frozenset({"claude", "cursor", "path", "path-shim", "workbuddy"})
 _EMPTY_REJECTED_FLAGS = (
     ("--execute", "execute"),
     ("--yes", "yes"),
@@ -1003,7 +1003,7 @@ def _handle_setup(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteE
             return [], [
                 error(
                     "usage_error",
-                    "setup --config/--project/--cli require a selector: claude, cursor, or path",
+                    "setup --config/--project/--cli require a selector: claude, cursor, path, or workbuddy",
                 )
             ]
     preflight = platform_report()
@@ -1059,7 +1059,7 @@ def _handle_setup(args: argparse.Namespace) -> tuple[list[Any], list[SafeDeleteE
             )
         if selector is None:
             steps.append(
-                "install a boundary with: safe-delete setup claude | cursor | path"
+                "install a boundary with: safe-delete setup claude | cursor | path | workbuddy"
             )
     report = _setup_report(selector, preflight, install_result, doctor_result, steps, initialized)
     # The report travels with the envelope even on failure so a caller can see
