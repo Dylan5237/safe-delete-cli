@@ -926,6 +926,26 @@ class _FileTransaction:
             )
 
 
+def _workbuddy_config_path(project_path: Path | None) -> Path:
+    """Resolve the WorkBuddy settings path (Spike-proven product tree).
+
+    Preference order for the ``workbuddy`` selector:
+    1. ``$WORKBUDDY_CONFIG_DIR/settings.json`` when the env is set
+    2. ``~/.workbuddy/settings.json`` (desktop default after v2.48.0 separation)
+    3. ``<project>/.workbuddy/settings.json`` when ``--project`` is passed
+
+    Sibling engine paths (``.codebuddy`` / ``CODEBUDDY_CONFIG_DIR``) are not
+    defaults for this selector; they remain engine facts only.
+    """
+
+    if project_path is not None:
+        return project_path / ".workbuddy" / "settings.json"
+    override = os.environ.get("WORKBUDDY_CONFIG_DIR")
+    if override is not None and override.strip() != "":
+        return Path(os.path.abspath(override)) / "settings.json"
+    return _home_dir() / ".workbuddy" / "settings.json"
+
+
 def select_integration(
     selector: str | None,
     *,
@@ -935,14 +955,14 @@ def select_integration(
     """Resolve the supported management selector to an exact boundary."""
 
     if selector is None:
-        raise error("usage_error", "a hook selector is required: claude, cursor, or path-shim")
+        raise error("usage_error", "a hook selector is required: claude, cursor, path-shim, or workbuddy")
     selector = selector.strip().lower()
     if selector in {"path-shim", "rm-shim"}:
         if config is not None or project is not None:
             raise error("usage_error", "path-shim does not use a host configuration path")
         paths = package_paths()
         return IntegrationSpec("path-shim", "path-shim", paths["bin"] / "rm", None, None, paths["bin"])
-    if selector not in {"claude", "cursor"}:
+    if selector not in {"claude", "cursor", "workbuddy"}:
         raise error("unsupported_command", f"unsupported hook host: {selector}", selector=selector)
 
     if config is not None:
@@ -960,6 +980,8 @@ def select_integration(
                 if project_path is not None
                 else _home_dir() / ".claude" / "settings.json"
             )
+        elif selector == "workbuddy":
+            config_path = _workbuddy_config_path(project_path)
         else:
             assert project_path is not None
             config_path = project_path / ".cursor" / "hooks.json"
@@ -969,7 +991,7 @@ def select_integration(
         mode="pretooluse",
         adapter_path=paths["pretooluse"],
         config_path=config_path,
-        event_key="PreToolUse" if selector == "claude" else "preToolUse",
+        event_key="PreToolUse" if selector in {"claude", "workbuddy"} else "preToolUse",
         bin_dir=paths["bin"],
     )
 
@@ -1019,10 +1041,11 @@ def _add_host_registration(config: dict[str, Any], spec: IntegrationSpec) -> boo
     command_path = str(spec.adapter_path)
     if any(_command_in_hook(item, command_path) for item in hooks):
         return False
-    if spec.selector == "claude":
+    if spec.selector in {"claude", "workbuddy"}:
+        matcher = "Bash|execute_command" if spec.selector == "workbuddy" else "Bash"
         hooks.append(
             {
-                "matcher": "Bash",
+                "matcher": matcher,
                 "hooks": [{"type": "command", "command": command_path}],
             }
         )
@@ -1315,7 +1338,7 @@ def hook_status(
             spec = _registered_spec(spec, _registry_entry_for(spec, registry))
         return [_status_one(spec, registry, root=root)]
     result: list[dict[str, Any]] = []
-    for name in ("claude", "cursor", "path-shim"):
+    for name in ("claude", "cursor", "path-shim", "workbuddy"):
         spec = select_integration(name)
         spec = _registered_spec(spec, _registry_entry_for(spec, registry))
         result.append(_status_one(spec, registry, root=root))
@@ -1651,7 +1674,7 @@ def hook_uninstall(
 def management_selectors() -> tuple[str, ...]:
     """Selectors intentionally advertised by ``safe-delete hook``."""
 
-    return ("claude", "cursor", "path-shim", "rm-shim")
+    return ("claude", "cursor", "path-shim", "rm-shim", "workbuddy")
 
 
 def _integration_is_registered(adapter: str) -> bool:
@@ -1691,7 +1714,7 @@ def _integration_is_registered(adapter: str) -> bool:
         if not isinstance(entry, dict) or entry.get("enabled") is not True:
             continue
         selector = entry.get("selector")
-        if selector not in {"claude", "cursor"}:
+        if selector not in {"claude", "cursor", "workbuddy"}:
             continue
         config_path = entry.get("config_path")
         if not isinstance(config_path, str) or not config_path:

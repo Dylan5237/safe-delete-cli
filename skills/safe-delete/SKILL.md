@@ -63,13 +63,15 @@ Global flags on every command: `--root DIR`, `--json`, `--human`.
 | `restore ENTRY_ID` | Move a payload back. `--to PATH`, `--create-parents`. |
 | `purge` | Retention-scoped removal of payloads. Preview by default; `--older-than`, `--before`, `--execute`, `--yes`, `--dry-run`. |
 | `empty` | Remove everything currently eligible, with an explicit confirmation token. `--older-than`, `--before`, `--confirm TOKEN`. |
-| `setup [claude\|cursor\|path]` | One-shot: platform preflight, `hook install`, read-only `doctor`, next steps. `--init` opts in to creating the storage root; `--host`, `--config`, `--project`, `--cli`. |
+| `setup [claude\|cursor\|path\|workbuddy]` | One-shot: platform preflight, `hook install`, read-only `doctor`, next steps. `--init` opts in to creating the storage root; `--host`, `--config`, `--project`, `--cli`. |
 | `hook install\|status\|disable\|uninstall [selector]` | Manage the boundaries. `--host`, `--config`, `--project`, and `--cli` on `install`. |
 | `doctor` | Read-only aggregate report. Writes, creates, repairs, and configures nothing. |
 | `version` | Version and contract/schema versions. |
 
-Selectors: `claude` (user-global), `cursor` (project-local), `path-shim`
+Selectors: `claude` (user-global), `cursor` (project-local), `workbuddy`
+(user-global WorkBuddy desktop; settings under `~/.workbuddy` or `$WORKBUDDY_CONFIG_DIR`), `path-shim`
 (alias `rm-shim`). `setup path` is a setup-only spelling of `path-shim`.
+There is no user-facing `codebuddy` selector.
 
 ## Deleting a file or directory
 
@@ -143,6 +145,7 @@ entry stays `active`, and the command returns `partial_failure` (exit `5`).
 ```bash
 safe-delete setup --json                  # read-only: state + selectors
 safe-delete setup claude --init --json    # install Claude's boundary, then doctor
+safe-delete setup workbuddy --init --json # install WorkBuddy PreToolUse boundary
 safe-delete setup path --json             # PATH shim; activation is operator-owned
 safe-delete hook status --json            # per-selector installed/enforced/warning
 safe-delete doctor --json                 # read-only aggregate report

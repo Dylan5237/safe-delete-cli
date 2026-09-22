@@ -242,7 +242,7 @@ class P8_1_SetupOneShotTests(P8Harness):
         self.assertTrue(doctor["read_only"])
         self.assertEqual(
             [item["selector"] for item in doctor["boundaries"]],
-            ["claude", "cursor", "path-shim"],
+            ["claude", "cursor", "path-shim", "workbuddy"],
         )
         self.assertEqual(doctor["restore"]["residual_note"], RESIDUAL_NOTE)
         self.assertTrue(report["next_steps"])
@@ -280,7 +280,7 @@ class P8_1_SetupOneShotTests(P8Harness):
         self.assertTrue(report["doctor"]["read_only"])
         self.assertEqual(
             [item["selector"] for item in report["doctor"]["boundaries"]],
-            ["claude", "cursor", "path-shim"],
+            ["claude", "cursor", "path-shim", "workbuddy"],
         )
         self.assertFalse(any(item["installed"] for item in report["doctor"]["boundaries"]))
 

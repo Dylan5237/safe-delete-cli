@@ -1747,7 +1747,7 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(report["artifacts"], [])
         self.assertEqual(
             [item["selector"] for item in report["boundaries"]],
-            ["claude", "cursor", "path-shim"],
+            ["claude", "cursor", "path-shim", "workbuddy"],
         )
         self.assertFalse(any(item["installed"] for item in report["boundaries"]))
         self.assertTrue(report["platform_preflight"]["passed"])
