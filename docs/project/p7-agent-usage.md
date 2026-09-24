@@ -281,8 +281,9 @@ POSIX Python.
 
 | Path form | Status |
 | --- | --- |
-| `/home/<user>/project` (WSL-native) | Supported. This is the expected working shape. |
-| `/mnt/c/...` (DrvFs) | **Unverified configuration.** DrvFs is a different filesystem from the WSL home root, so `add` of a `/mnt/c` path into a home-based root is rejected with `cross_device`. Putting the root itself under `/mnt/*` is untested: `fcntl` locking semantics on 9P/DrvFs have no evidence behind them. Do not treat a green `hook status` on such a root as proven enforcement. |
+| `/home/<user>/project` (WSL-native) | Supported, unchanged. This is the expected working shape for a source and root on the WSL home filesystem. |
+| `/mnt/<drive>/...` source, root on a different `st_dev` | `cross_device`, exit 2. This is the usual case when the root is the WSL home filesystem. Do not copy. Do not `rm`. Do not point `--root` at `/mnt` to bypass that unless the root's final component is `safe-delete` **and** the source is on that same drive. |
+| same-drive root `.../safe-delete` | Supported with this residual: `DrvFs/9p root: same-filesystem rename uses renameat (flags 0) after lstat because renameat2(RENAME_NOREPLACE) is not supported. Atomic rename, not a copy. Check/rename race remains. Not an Exception #12 change.` `doctor` / `hook status` `enforced: true` is only the registered hook boundary. It is not proof of `RENAME_NOREPLACE` and not proof of Windows-side locking. |
 | `\\wsl$\...` | **Denied.** The hook protocol requires an absolute, normalized POSIX `cwd`; a Windows-side path form is fail-closed denied — in practice every `rm` inside Cursor is refused. |
 
 Hook requests need a POSIX `cwd`, and the installed adapter is a
@@ -294,8 +295,10 @@ a POSIX `python3` mean you are in the supported case. Symmetric bridge recipes
 such as invoking the CLI from Windows into WSL are unverified and must not be
 documented as supported.
 
-The ledger lives inside the WSL home. Windows-side tools generally cannot see
-it; the observability promise is "run `list`/`show` inside WSL".
+The default ledger lives inside the WSL home. A same-drive root whose final
+component is `safe-delete` may live on `/mnt/<drive>` and serves only paths
+with that same `st_dev`. Windows-side tools generally cannot see a home
+ledger; the observability promise is "run `list`/`show` inside WSL".
 
 ## 7. Hook status and boundary reading
 
@@ -316,7 +319,14 @@ storage root and its usability, the same per-selector `hook status` entries
 of every *installed* artifact, and the resolved CLI paths with a world-writable
 flag. `needs_attention` is true only when one of those inspected surfaces has a
 problem; `false` means "nothing detected", never "your project is protected" and
-never "deletion is safe".
+never "deletion is safe". A 9p root does not by itself set `needs_attention`.
+When the root's `f_type` is 9p, `storage.filesystem` is `v9fs`,
+`storage.noreplace` is `emulated`, and `storage.noreplace_residual` is the
+verbatim DrvFs check/rename sentence above. Other roots use
+`storage.noreplace` `native` and `storage.noreplace_residual` null. `doctor`
+stays read-only: the probe is `fstatfs` only. Human `doctor` prints that
+residual sentence when `noreplace` is `emulated`. `enforced: true` is not
+proof of `RENAME_NOREPLACE`.
 
 `hook status` (no selector) prints one entry per selector
 (`claude`, `cursor`, `path-shim`), each with:

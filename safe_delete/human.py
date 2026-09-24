@@ -212,6 +212,8 @@ def _render_doctor(
             )
             if storage.get("reason_code"):
                 lines.append(f"  reason: {storage.get('reason_code')}")
+            if storage.get("noreplace") == "emulated" and storage.get("noreplace_residual"):
+                lines.append(str(storage["noreplace_residual"]))
         lines.append("boundaries:")
         for status in report.get("boundaries") or []:
             if not isinstance(status, Mapping):
