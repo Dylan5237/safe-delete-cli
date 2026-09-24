@@ -19,7 +19,9 @@ PowerShell, ``os.unlink`` or any other language filesystem API, an absolute
 must not claim that the current project is protected, any enforcement on native
 Windows, that Exception #12 is fixed, or that a usable storage root means
 deletion is safe.  ``needs_attention: false`` means only that no problem was
-detected in the inspected surfaces.
+detected in the inspected surfaces.  A 9p storage root does not by itself set
+``needs_attention``.  ``storage.noreplace == "emulated"`` is not a
+``RENAME_NOREPLACE`` claim.
 
 The bypass inventory is reported as data (``out_of_coverage``), never as a
 coverage claim: those ten entries are the statement of what is *not* covered.
@@ -40,6 +42,7 @@ from .hook import (
     is_world_writable,
     payload_source_path,
 )
+from .move import noreplace_storage_fields
 from .platform_check import platform_report
 
 
@@ -80,7 +83,10 @@ def run_doctor(root: str | None = None) -> dict[str, Any]:
 
     platform = platform_report()
     statuses = hook_status(None, root=root)
-    storage: Mapping[str, Any] = statuses[0].get("storage", {}) if statuses else {}
+    raw_storage: Mapping[str, Any] = statuses[0].get("storage", {}) if statuses else {}
+    storage: dict[str, Any] = dict(raw_storage)
+    root = storage.get("root")
+    storage.update(noreplace_storage_fields(root if isinstance(root, str) else None))
 
     problems: list[str] = []
     artifacts: list[dict[str, Any]] = []
@@ -150,7 +156,7 @@ def run_doctor(root: str | None = None) -> dict[str, Any]:
             "passed": platform["supported"],
             "missing_primitives": platform["missing_primitives"],
         },
-        "storage": dict(storage),
+        "storage": storage,
         "boundaries": statuses,
         "artifacts": artifacts,
         "cli": {"paths": cli_paths, "world_writable": world_writable},

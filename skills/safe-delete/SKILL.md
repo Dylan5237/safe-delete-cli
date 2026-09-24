@@ -33,6 +33,22 @@ unsupported platform: requires Linux/macOS/WSL (fcntl)
 
 Nothing on the Windows side of a WSL split is covered by this product.
 
+WSL DrvFs (`/mnt/<drive>`) is a different filesystem from the WSL home root.
+`add` of a `/mnt/<drive>` path into a home root fails with `cross_device`
+(exit 2). Do not copy. Do not `rm`. Never invent `--root` under `/mnt` for a
+cross-device source. A same-drive root is the supported shape only when its
+final component is `safe-delete` and the source has the same `st_dev`. Read
+`errors[].code` (`cross_device` versus success). On that root:
+
+```text
+DrvFs/9p root: same-filesystem rename uses renameat (flags 0) after lstat because renameat2(RENAME_NOREPLACE) is not supported. Atomic rename, not a copy. Check/rename race remains. Not an Exception #12 change.
+```
+
+That residual is not Exception #12. `doctor` `needs_attention: false` is not a
+`RENAME_NOREPLACE` claim and is not set solely because the root is 9p.
+`enforced: true` is only the registered hook boundary. `\\wsl$\...` remains
+denied.
+
 ## Rules for agents
 
 - **Always pass `--json`.** Machine output is the stable interface; human
