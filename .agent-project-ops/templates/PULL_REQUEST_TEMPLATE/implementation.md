@@ -1,48 +1,48 @@
-## Summary
+## 改动说明
 
-<!-- What changed in product/library/docs **code**. One Phase / one task. -->
+- 对应 Issue：
+- 对应 Phase：
+- 本次解决的问题：
 
-- Issue: #
-- Phase: #
-- Freeze ACK comment:
-
-## Type
+## 类型
 
 - [ ] `feat`
 - [ ] `fix`
-- [ ] `docs` (no behavior change)
+- [ ] `docs`（不改变行为）
 
-## Worktree
+## 工作目录与分支
 
-`{repo}/.worktrees/{issue-or-phase}-{owner}-{slug}`
+工作目录：主检出，或 `{repo}/.worktrees/{issue-or-phase}-{owner}-{slug}`  
+分支：`feat|fix|docs/{issue}-{slug}` → 通过 `origin` 的 PR 合并到默认分支
 
-Branch: `feat|fix|docs/{issue}-{slug}` → target `main` via **origin only**
+## 合同和范围
 
-## Contract
+- 涉及的冻结范围：
+- 已遵守的非目标：
+- 是否改变已冻结接口：否 / 是（若是，先暂停并申请例外）
+- `CONTRACT FREEZE` 和大改动检查记录：
 
-- In-scope items touched:
-- NON-GOALS respected:
-- Frozen interfaces unchanged? **yes / no** (if no → stop; open Architecture Exception)
+## 实施与验证
 
-## Test plan (implementation)
+- 改动摘要：
+- 检查命令及结果：
+- 失败、未运行或无法验证的项目：
 
-<!-- Automated/manual tests that **are code** belong here. Proof artifacts belong on an evidence PR. -->
+## 验收证据
 
--
+可在此 PR 或 Phase Issue 中记录证据和链接。需要单独保存大型验证材料时，可以另开证据 PR；不是必须步骤。
 
-## Evidence
+- Phase Issue 或实现 PR 中的证据链接：
+- 可选的独立证据 PR：
 
-This PR must **not** be the evidence pack. Link evidence PR or Issue proofs:
+## 合并不等于最终验收
 
--
+合并只表示改动进入默认分支。Phase 或发布仍须由拍板人按固定流程最终验收；Agent 不得自行宣布 PASS。
 
-## Merge ≠ PASS
+## 检查清单
 
-Merging this PR does not close the Phase. Disposer still records `PHASE ACCEPT` on the Phase issue.
-
-## Checklist
-
-- [ ] One task, one branch, one worktree
-- [ ] No `evidence/`-only files mixed in
-- [ ] No push to `main`
-- [ ] Secrets not committed
+- [ ] 一个任务、一条分支、一个工作目录
+- [ ] 没有直接推送默认分支
+- [ ] 没有提交密钥或个人信息
+- [ ] 总控台第 1 节已更新；无法更新时已记录阻塞
+- [ ] 已核对当前 PR 提交所需的 CI 和审查条件

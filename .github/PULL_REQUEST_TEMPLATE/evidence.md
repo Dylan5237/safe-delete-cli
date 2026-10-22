@@ -1,38 +1,35 @@
-## Summary
+## 可选：单独保存验证证据
 
-Replayable **proofs** for frozen acceptance tests. **No feature/fix/docs product diff.**
+只有当验证材料较大、需要单独审阅或需要独立保存时，才使用此模板。通常把证据记在 Phase Issue 或实现 PR 即可，不要求为验收另开 PR。
 
-- Issue / Phase: #
-- Implementation PR:
-- SHA under test:
+- 对应 Issue / Phase：
+- 对应实现 PR（如有）：
+- 正在验证的提交 SHA：
 
-## Branch
+## 证据表
 
-`evidence/{issue}-{slug}` — label `pr:evidence`
-
-## Proof table
-
-| Frozen acceptance test | Command / method | Artifact path or URL | Result |
+| 冻结的验收项 | 命令或办法 | 材料路径或链接 | 结果 |
 | --- | --- | --- | --- |
-| | cwd + command | | pass/fail |
+| | 工作目录 + 命令 | | 通过 / 失败 |
 
-## How to replay
+## 复验方法
 
 1.
 2.
 
-## Redaction
+## 隐私检查
 
-- [ ] Secrets, tokens, PII removed
-- [ ] Logs are excerpts, not entire production dumps
+- [ ] 已移除密钥、令牌和个人信息
+- [ ] 日志只包含必要节选，不包含整份生产日志
 
-## Agent proposal
+## Agent 说明
 
-- [ ] `EVIDENCE READY` posted on the Phase issue
-- [ ] Not commenting `PHASE ACCEPT` (disposer only)
+- [ ] 已在对应 Phase Issue 链接本 PR 和证据表
+- [ ] Agent 只报告验证结果，没有代替拍板人作最终验收
 
-## Checklist
+## 检查清单
 
-- [ ] Diff is evidence-only
-- [ ] Does not mix with `feat/`/`fix/` changes
-- [ ] Merge of this PR still ≠ Phase PASS
+- [ ] 本 PR 没有与验证无关的产品改动
+- [ ] 已说明材料如何复验
+- [ ] PR 合并不代表 Phase PASS
+- [ ] 已核对当前提交所需的 CI 和审查条件；未完成项已说明

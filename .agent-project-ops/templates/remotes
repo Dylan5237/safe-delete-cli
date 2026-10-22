@@ -1,0 +1,2 @@
+# Supported remote registry. Other write targets are not supported.
+authority=origin

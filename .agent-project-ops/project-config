@@ -1,0 +1,3 @@
+process_mode=light
+agent_tools=codex
+external_tools=none

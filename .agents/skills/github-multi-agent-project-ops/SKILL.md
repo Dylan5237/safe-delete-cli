@@ -1,10 +1,10 @@
 ---
 name: github-multi-agent-project-ops
 description: >
-  Operate a business git repo as a local coding Agent that often owns day-to-day
-  project ops. GitHub Issues/PRs are the control plane; chat is not state.
-  Use when starting a repo, staffing Agents, running Freeze→Implement→Verify→Accept,
-  or when the user mentions Command Center, phases, or agent-project-ops.
+  Lead APO project operations: freeze scope, prepare and dispatch task Issues,
+  reconcile ownership, review and merge task PRs after required checks, and
+  coordinate human final acceptance. Use for Command Center or Phase ownership;
+  an Agent assigned only one execution task uses the executor skill instead.
 ---
 
 # github-multi-agent-project-ops (pinned wrapper)

@@ -1,10 +1,9 @@
-# Process/binding surfaces. {{DISPOSER}} is substituted by bootstrap.
+# 规则、Hook 和 Skills 由拍板人审阅；部署时由 bootstrap 替换 {{DISPOSER}}。
 /AGENTS.md {{DISPOSER}}
 /CLAUDE.md {{DISPOSER}}
 /.agent-project-ops/ {{DISPOSER}}
 /.agents/ {{DISPOSER}}
 /.claude/ {{DISPOSER}}
-/.cursor/ {{DISPOSER}}
+/.codebuddy/ {{DISPOSER}}
 /.github/CODEOWNERS {{DISPOSER}}
-/.github/copilot-instructions.md {{DISPOSER}}
 /.githooks/ {{DISPOSER}}

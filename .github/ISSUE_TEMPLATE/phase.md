@@ -1,58 +1,65 @@
 ---
 name: Phase
-about: 一个阶段只解决一个核心问题 — Freeze before implementation
+about: 一个阶段只解决一个核心问题；先冻结合同，再按验收口径实施
 title: "[Phase] "
 labels: "type:phase, status:backlog"
 ---
 
-## Core problem / 核心问题（仅一个）
+## 核心问题（仅一个）
 
-<!-- One sentence. If you need two, open two phases. -->
+<!-- 用一句话说明要解决的问题。若有两个核心问题，请拆成两个阶段。 -->
 
-## NON-GOALS / 非目标
-
--
-
-## Owner (implementer)
+## 不做的事
 
 -
 
-## Freeze contract / 待冻结
-
-### In scope
+## 执行负责人
 
 -
 
-### Interfaces / data contracts
+## 冻结合同
+
+### 范围
 
 -
 
-### Acceptance tests / 验收口径（可复验）
+### 接口或数据约定
+
+-
+
+### 验收办法（可复验）
 
 1.
 2.
 
-### Risks
+### 风险
 
 -
 
-## Freeze log
+## 冻结记录
 
-- [ ] Contract written in this body
-- [ ] Disposer comment: `FREEZE ACK` + date
-- [ ] No `feat/`/`fix/` branch before ACK
+- [ ] 合同已写在本 Issue
+- [ ] 已评论 `CONTRACT FREEZE` 和日期，并写明 `大改动检查：无` 或 `大改动检查：命中第 N 条`
+- [ ] 命中大改动清单时，已链接拍板人的开工批准；若由已批准方案提前覆盖，也要链接原批准并说明本阶段没有超出方案
+- [ ] 冻结和需要的批准完成前，没有创建 `feat/` 或 `fix/` 分支
+- [ ] 本次冻结和状态变化已同步到总控台第 1 节
 
-## Implementation links
+## 实施链接
 
-- Worktree:
-- PRs:
+- 工作目录（主检出或 `.worktrees/…`）：
+- 分支：
+- 实现 PR：
 
-## Verification
+## 验证与验收
 
-- Evidence PR or proof comment:
-- Agent proposal (`EVIDENCE READY`):
-- Disposer: `PHASE ACCEPT` / `PHASE RETURN`
+- 证据所在 Issue、实现 PR 或附件链接：
+- 独立证据 PR（可选，如已创建）：
+- 收尾检查（`apo-tidy:`）：
+- 最终验收请求（`D-n` 和链接）：
+- 拍板人回复：`批准 A` / `改用 B` / `退回：<原因>`（旧回复 `PHASE ACCEPT` / `PHASE RETURN` 仍有效）
 
-## Notes
+证据可直接记录在本 Issue 或实现 PR 中。单独开证据 PR 是可选做法，不是验收前提。Agent 只能提交证据和验收请求，不能替拍板人回复或宣布 PASS。
 
-<!-- Paste chat decisions here. Chat ≠ state. -->
+## 备注
+
+<!-- 聊天中的决定要记录在项目 Issue 中；聊天本身不是项目状态。 -->

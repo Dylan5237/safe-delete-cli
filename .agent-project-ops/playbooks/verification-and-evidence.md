@@ -2,47 +2,25 @@
 
 ## Goal
 
-Make Phase Accept **replayable**: a disposer who was not in the chat can follow evidence to the frozen acceptance tests. Keep evidence PRs distinct from implementation PRs.
-
-## When
-
-- Implementation is reviewable or merged per Command Center policy.
-- Phase is entering `status:verification`.
-- Agent wants to propose `PHASE PASS` (proposal only).
-
-## Preconditions
-
-- Freeze ACK exists.
-- Acceptance tests on the Phase issue are the only bar.
-- No secrets in evidence (redact tokens, customer data, `.env`).
+Make final acceptance replayable from frozen tests. Evidence may live in the implementation PR or Issue; a separate evidence PR is optional. Load [PRINCIPLES.md](../PRINCIPLES.md) §3, §9 and §12 first.
 
 ## Steps
 
-1. **Map tests to proofs.** Table on the Phase or evidence PR:
+1. Map each frozen acceptance test to the actual command, exit status, source SHA and proof link. Tests/fixtures and concise log excerpts may accompany implementation code. Redact secrets.
+2. Label the Phase `status:verification` and update Command Center **section 1**. [ ] **CC §1 updated**
+3. Use Issue/PR comments or attachments for large/binary evidence. Do not publish secrets or unrelated feature changes under an evidence-only label. Use `evidence/{issue}-{slug}` and the evidence PR template only when a separate PR is useful.
+4. Publish **one** formal final-acceptance request using [templates/decision-request.md](../templates/decision-request.md). Its `apo-decision` marker must be the first line; include the acceptance table, known limitations, 1–2 replay steps and the latest `apo-tidy:` line. `EVIDENCE READY` is an evidence report, not a replacement for this request.
+5. Only the disposer's reply (`批准 A`, `改用 B`, `退回：<原因>`; legacy `PHASE ACCEPT` / `PHASE RETURN`) determines final acceptance. Record the reply with `apo-decision-result` and reference every target.
+6. Missing proof means blocked or verification, never done. PR merge, CI and the Agent's own judgment do not replace acceptance. Update CC §1 on each gate flip.
 
-   | Frozen acceptance test | Proof | Location |
-   | --- | --- | --- |
-   | … | command + exit | `evidence/…` or comment gist permalink |
+## Evidence table
 
-2. **Prefer in-repo evidence** when the business repo already stores fixtures/docs: open `evidence/{issue}-{slug}` and `templates/PULL_REQUEST_TEMPLATE/evidence.md`.
-   - Allowed: logs **excerpts**, screenshots, test runner output, curl transcripts, seed scripts used **only** to reproduce.
-   - Forbidden: feature code, refactors, dependency bumps “while we’re here.”
-3. **If evidence cannot live in git** (binary size, secrets): attach to the Issue comment or a **private** gist and paste the URL on the Phase. Still no mix with implementation commits.
-4. **Agent proposes.** Comment `EVIDENCE READY` + table. Do not comment `PHASE ACCEPT`.
-5. **Disposer verifies** by replaying at least the critical path (or records why replay was sampled). Then `PHASE ACCEPT` or `PHASE RETURN` with failing test ids.
-6. **Fail closed.** Missing proof for any frozen test → `status:blocked` or remain in `verification`, never `done`.
+| Frozen acceptance test | Actual result | Replay/evidence link | Limitations |
+| --- | --- | --- | --- |
+| … | … | … | … |
 
 ## Done when
 
-- [ ] Every frozen acceptance test has a proof link.
-- [ ] Evidence PR (if any) contains **zero** implementation diff.
-- [ ] Implementation PR contains **zero** “proof-only” dumps that belong in evidence (keep tests that *are* product code in implementation).
-- [ ] Disposer can replay without the original Agent chat.
-
-## Anti-patterns
-
-- “Works on my machine” with no command, cwd, or SHA.
-- Screenshots of the IDE instead of the behavior.
-- Evidence files on `feat/` branches.
-- Agent self-Accept after pasting logs.
-- Storing production secrets in `evidence/`.
+- Every frozen acceptance test has replayable evidence.
+- The latest formal request and the actual disposer reply are linked.
+- Sensitive information is redacted and CC §1 reflects the gate.
