@@ -1,0 +1,12 @@
+{
+  "layout_version": 1,
+  "agent_tools": {
+    "codex": {"label": "Codex", "skills_dir": ".agents/skills"},
+    "claude": {"label": "Claude Code", "skills_dir": ".claude/skills"},
+    "workbuddy": {"label": "WorkBuddy (Craft)", "skills_dir": ".codebuddy/skills"}
+  },
+  "external_tools": {
+    "arckeep": {"label": "Arckeep", "guide": "arckeep.md", "names": ["Arckeep"]},
+    "grok-bot": {"label": "Grok Bot", "guide": "grok-bot.md", "names": ["Grok Bot", "GrokBot", "grok-bot", "grok_bot"]}
+  }
+}

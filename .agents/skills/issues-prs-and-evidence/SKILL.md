@@ -1,8 +1,7 @@
 ---
 name: issues-prs-and-evidence
 description: >
-  Keep GitHub Issues as canonical state, use status labels, split implementation
-  PRs from evidence PRs, and fail closed when blocked or the freeze must change.
+  Keep GitHub Issues as canonical state, use status labels, attach replayable evidence to task PRs or Issues, and fail closed when blocked or the freeze must change.
   Use when filing phases, Command Center, Architecture Exception, verification,
   or PR templates.
 ---

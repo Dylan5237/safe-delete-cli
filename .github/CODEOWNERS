@@ -1,10 +1,9 @@
-# Process/binding surfaces. @Dylan5237 is substituted by bootstrap.
+# 规则、Hook 和 Skills 由拍板人审阅；部署时由 bootstrap 替换 @Dylan5237。
 /AGENTS.md @Dylan5237
 /CLAUDE.md @Dylan5237
 /.agent-project-ops/ @Dylan5237
 /.agents/ @Dylan5237
 /.claude/ @Dylan5237
-/.cursor/ @Dylan5237
+/.codebuddy/ @Dylan5237
 /.github/CODEOWNERS @Dylan5237
-/.github/copilot-instructions.md @Dylan5237
 /.githooks/ @Dylan5237

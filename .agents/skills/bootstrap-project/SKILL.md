@@ -3,9 +3,9 @@ name: bootstrap-project
 description: >
   Initialize a new generic git project using Dylan5237/agent-project-ops:
   create a local folder, durable Agent binding files, a pinned methodology
-  snapshot, .worktrees/, a GitHub origin as the single write authority, and an
-  optional projection remote. Use for one-shot project initialization; not for
-  product/domain setup or creating a second source of truth.
+  snapshot, .worktrees/ and GitHub origin as the only supported remote; use for one-shot initialization, not business-domain setup.
+  Also triggered by the URL-first Chinese request:
+  使用 https://github.com/Dylan5237/agent-project-ops 初始化当前项目。
 ---
 
 # bootstrap-project (pinned wrapper)

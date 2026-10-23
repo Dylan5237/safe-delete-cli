@@ -2,63 +2,21 @@
 
 ## Goal
 
-Use **one remote (`origin`)** and **named topic branches** so Agents never push `main` and never invent a shadow remote. This is the **default** for single-remote projects.
-
-If a **projection** (mirror) remote exists, this playbook still governs **topic branch names and authority pushes**. Mirroring, divergence, and cleanup are [git-authority-and-projection.md](./git-authority-and-projection.md) — do not treat the extra remote as a second `origin`.
-
-## When
-
-- Creating or pushing any branch.
-- Configuring a new clone.
-- An Agent is tempted to “just commit on main.”
-
-## Preconditions
-
-- Default branch is protected (see start-project).
-- Worktree playbook followed for in-flight work.
-- Issue number known (used in the branch name).
+Use GitHub `origin` as the only remote and named topic branches. Additional remotes are unsupported; preserve existing configuration for explicit migration review, never silently remove it or use it to bypass origin.
 
 ## Steps
 
-1. **Remotes.** Default: **`origin` only.** `git remote -v` should show a single write remote for this workflow. Fork remotes: do not push workflow branches there unless Command Center says so.
-2. **Optional projection remote.** If Command Center names a second remote as **projection only**, stop using this file as the full remote policy. Follow [git-authority-and-projection.md](./git-authority-and-projection.md) **before any non-`origin` push**. Still push topic branches **only** to authority `origin`. **Never** `git push` `feat/` `fix/` `docs/` `evidence/` (or other task branches) to the projection remote.
-3. **Update base.**
-
-   ```bash
-   git fetch origin
-   git merge --ff-only origin/main   # only on a throwaway sync; topic branches rebase/merge per Command Center
-   ```
-
-   Prefer: create branches from the **current authority tip** (usually `origin/main`, or the Command Center–named transitional branch until it merges), not from a dirty local `main`.
-4. **Name the branch:** `{type}/{issue}-{slug}` where `type` is one of:
-   - `feat` — new behavior
-   - `fix` — defect
-   - `docs` — documentation only
-   - `evidence` — verification artifacts only (no product behavior change)
-5. **Slug:** kebab-case, from the issue; keep it short. Example: `feat/42-add-healthcheck`, `evidence/42-healthcheck-logs`.
-6. **Push:**
-
-   ```bash
-   git push -u origin HEAD
-   ```
-
-   Never: `git push origin main`. Never: `--force` on `main`. Force-with-lease on a **topic** branch only if the Issue comments that the branch is Agent-private and not under review.
-7. **PR target:** `main` (or the default branch named on Command Center).
-8. **After merge:** delete the remote topic branch on **authority**; remove worktree; do not keep pushing the old name. After the **authority tip** merges to the default branch, **new work starts from that tip** (fetch `origin`; do not base the next branch on a superseded transitional head).
-9. **Do not** add `upstream` / `backup` / unnamed remotes to replace Issues or to dodge protected `main`. A named projection remote is not a backup workflow; it is a mirror (see the projection playbook).
+1. Read AGENTS.md and the Command Center. Check `git remote -v` and `.agent-project-ops/remotes` (`authority=origin`). Unknown/extra remotes stop affected writes.
+2. Freeze the task contract and major-change check before creating its branch; a hit requires a disposer decision or a named pre-approval.
+3. Fetch origin. Resolve the approved origin task base from explicit selection, project configuration or the verified remote default; use [git-worktree.md](git-worktree.md). Do not assume main when the project uses another base.
+4. Branch names: `feat|fix|docs|evidence/{issue}-{slug}`. `evidence/` is optional for a proof-only PR; tests and evidence may also accompany the implementation PR or Issue.
+5. Push with `git push -u origin HEAD`, open a PR to the project's real default branch, and inspect all current-SHA required CI and review gates before merge. Never push directly to the default branch or rewrite its history.
+6. After merge or close run `scripts/tidy-worktrees.sh --apply`. It removes only proven finished work, archives closed-unmerged tips before deletion and keeps uncertainty/local changes. Do not delete by hand. New work starts from the updated authority tip.
+7. A long-lived branch, parked work, dirty/ignored contents or unverifiable PR is retained with a reason. Use `--park` / `--abandon` only under the existing retirement contract.
 
 ## Done when
 
-- [ ] Branch matches `feat|fix|docs|evidence/{issue}-{slug}`.
-- [ ] `origin` is the topic-branch push target (projection, if any, was not used for features).
-- [ ] `main` has no direct Agent commits from this workflow.
-- [ ] Evidence work is not on a `feat/` / `fix/` branch (and vice versa).
-
-## Anti-patterns
-
-- `git push origin main` “because protection isn’t set yet.”
-- Unnamed branches (`tmp`, `asdf`, `agent-1`).
-- Mixing evidence files and feature code on `feat/…`.
-- Adding `upstream`/`backup` remotes as a substitute for Issues or as a second SoT.
-- Pushing topic branches to a projection/mirror remote.
-- Rewriting `main` history (except disposer-authorized align in the projection playbook).
+- One task = one linked Issue, one branch and one PR.
+- Only origin receives pushes, no default-branch direct update.
+- Required checks/reviews were verified; evidence maps the frozen tests.
+- Retirement summary is recorded; PR merge is not final acceptance.

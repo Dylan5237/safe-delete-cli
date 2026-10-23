@@ -1,95 +1,27 @@
-# Playbook: Bootstrap project / 初始化并绑定项目
+# Playbook: Bootstrap project / 新项目初始化
 
-## Goal
-
-Create a generic project repository that is born with durable `agent-project-ops` binding instead of relying on the bootstrap chat to be remembered later.
-
-Bootstrap creates/binds the repository. It does **not** Freeze a product Phase, implement product code, or declare Phase PASS.
+For a new/empty repository only. Existing repositories use [adopt-existing-project.md](adopt-existing-project.md); never overwrite an existing working tree.
 
 ## Preconditions
 
-- Run from a real git checkout of `agent-project-ops`; supported bootstrap requires a real methodology commit SHA.
-- `git` is available. GitHub creation additionally requires an authenticated `gh` CLI.
-- A real disposer GitHub handle is known; placeholder `@DISPOSER` is not accepted.
-- Optional projection URL contains no embedded credential/query token.
+- A trusted clean full-history methodology Git checkout at the verified selected release SHA. A ZIP is not a provenance source.
+- Git, Bash and Python; authenticated gh and explicit authorization when creating a GitHub repository.
+- A real project slug and named disposer, no placeholder identity.
 
-## Supported path
+## Steps
 
-```bash
-scripts/bootstrap-project.sh \
-  --name example-project \
-  --disposer @example \
-  --no-projection
-```
+1. Inspect the destination. If it is nonempty, scan inherited rules and use adoption; an inverted authority contract must be fixed before PIN binding.
+2. Collect process mode, Agent tools (nonempty multi-select), and optional external tools using the host's native choices or ordinary conversation. Read IDs/labels from templates/project-options.json. External tools default to none; never infer an Agent selection. Headless input and --yes require all three explicit flags. Then use the selected release's --help / --dry-run and the approved command, for example:
 
-Use `--dry-run` first when evaluating a new environment. Use `--skip-github` only for local scaffold/testing.
+   ```bash
+   bash scripts/bootstrap-project.sh --name example --dir ../example --disposer @OWNER --process-mode standard --agent-tools codex,claude --external-tools none --skip-github --yes
+   ```
 
-Optional projection:
+3. Only GitHub origin is supported. Record choices in project-config and Command Center. AGENTS.md owns all rules; CLAUDE.md is exactly one @AGENTS.md line. .agents/skills is always the canonical source; only selected host copies and external integration guides are installed. WorkBuddy's .codebuddy/skills and AGENTS entry are verified in Craft mode; Ask is not a verified entry. No service connection or publishing channel is installed.
+4. Verify PIN SHA equals the clean source HEAD, authority=origin, core.hooksPath=.githooks and discoverable Skill wrappers. Run python3 .agent-project-ops/scripts/project-settings.py check --root . and check-core --root .; generation and the generated pre-push hook use these checks too. File-set/content drift and extra unselected adapters fail closed; do not delete project-owned files to make them pass.
+5. With approved GitHub creation, verify the observed protection capability: A independent code-owner gate, B PR-only, C unavailable/unverifiable. C on GitHub Free private may be expected; record it and continue honestly. Hooks remain bypassable. Shared human/Agent identity is not an independent review boundary.
+6. Continue with [start-project.md](start-project.md): labels, Command Center, process mode (unrecorded = standard), first task/Phase contract. No implementation before freeze and any required start confirmation.
 
-```bash
-scripts/bootstrap-project.sh \
-  --name example-project \
-  --disposer @example \
-  --projection-url git@gitlab.example:group/example-project.git
-```
+## Stop conditions
 
-The remote is named `projection`; it is never a feature-push target.
-
-## What bootstrap writes
-
-- root `AGENTS.md` plus adapters for supported Agent tools (`CLAUDE.md`, Cursor rule, Copilot instructions, optional Aider/Continue files)
-- `.agents/skills/*` and `.claude/skills/*` thin wrappers
-- `.agent-project-ops/` pinned methodology snapshot with real `PIN` SHA
-- `.agent-project-ops/remotes` (clone-portable classification; Git config itself is not portable)
-- `.githooks/pre-push` plus local `core.hooksPath=.githooks`
-- `.worktrees/` locally and a gitignore rule for it
-- GitHub Issue/PR templates and CODEOWNERS binding paths
-
-If a later user/Agent **clones** the business repo, the hook file arrives but `core.hooksPath` does not. Before first push it must run:
-
-```bash
-bash .agent-project-ops/scripts/install-hooks.sh
-```
-
-The root `AGENTS.md` carries this check.
-
-## GitHub protection capability
-
-Server policy is reported as observed capability, not marketing language:
-
-- **A — code-owner review enforced:** PR required and code-owner/approval gate verified.
-- **B — PR-only:** direct default-branch updates are blocked, but a writer may still be able to self-merge. This is the safe default when the Agent uses the same GitHub identity as the human owner.
-- **C — unprotected/BLOCKED:** requested branch protection could not be enabled or verified.
-
-Default bootstrap requests **B**. `--require-codeowner-review` requests **A**, but use it only when repository identity/ownership actually supports an independent reviewer; otherwise a single-user repository can be locked into an unusable review gate.
-
-If protection cannot be enabled, bootstrap returns a blocked result after repository creation. Do not start feature work; record the capability gap on Command Center.
-
-## After bootstrap
-
-1. Run [start-project.md](./start-project.md).
-2. Create labels and Command Center.
-3. Record the PIN, registered remotes, and protection capability.
-4. Open one Phase issue.
-5. Freeze before creating implementation work.
-
-## Done when
-
-- [ ] Generated project is a git repository with a real methodology SHA in `.agent-project-ops/PIN`.
-- [ ] Binding files and project skill wrappers exist.
-- [ ] `.agent-project-ops/remotes` names `origin` as authority and only requested projection remotes.
-- [ ] `core.hooksPath=.githooks` in the bootstrap checkout.
-- [ ] Fresh-clone instructions explicitly reinstall the hook configuration before first push.
-- [ ] `.worktrees/` exists locally and is ignored.
-- [ ] No generated file contains credential-bearing remote URLs.
-- [ ] If GitHub was created, `origin` is the GitHub authority and protection is reported as A, B, or C.
-- [ ] No product Phase has been self-Accepted by bootstrap.
-
-## Anti-patterns
-
-- Downloading the methodology as ZIP and accepting `sha=unknown`.
-- Treating the presence of `.githooks/pre-push` as proof the hook is installed after clone.
-- Calling PR-only protection “human approval enforced.”
-- Requiring one approval on a single-identity repository without understanding the lockout/self-review semantics.
-- Adding a second write remote for convenience.
-- Using a projection failure as permission to retarget feature pushes.
+Unknown source SHA, dirty copied source, unsafe URL, nonempty destination, placeholder disposer, missing required GitHub permission or unsupported remote option stops before a partial binding can be claimed complete. Bootstrap never rewrites an existing project or invents `sha=unknown`.
