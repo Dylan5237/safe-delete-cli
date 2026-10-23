@@ -36,17 +36,13 @@ done
 source "${url_guard}"
 url_has_secrets "${remote_url}" && deny "remote URL is unsafe or may embed credentials/query tokens"
 
-registry="${root}/.agent-project-ops/remotes"
-[[ -f "${registry}" ]] || deny "remote registry missing: ${registry}; classify remotes before pushing"
-
-authority="$(sed -n 's/^authority=//p' "${registry}" | head -1)"
-[[ -n "${authority}" ]] || deny "remote registry has no authority entry"
-[[ "${authority}" == "origin" ]] || deny "remote registry must name origin as the only write authority"
 [[ "${remote_name}" == "origin" ]] || \
-  deny "only GitHub origin is an allowed push target; legacy remote-role entries do not authorize '${remote_name}'"
+  deny "only the registered GitHub origin remote is an allowed push target"
 
-origin_identity="$(github_origin_identity "$root")" || \
-  deny "origin fetch/push URLs must resolve to the same supported GitHub repository"
+# Use the same complete authority contract as the worktree lifecycle commands;
+# reading just the first authority row misses extra remotes and legacy entries.
+origin_identity="$(github_worktree_authority "$root")" || \
+  deny "origin authority, remote registry and non-mirror configuration must be valid"
 push_identity="$(github_repo_identity "$remote_url")" || \
   deny "actual push URL is not a supported GitHub repository URL"
 [[ "$push_identity" == "$origin_identity" ]] || \
@@ -103,6 +99,6 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     if [[ "$initial" -eq 1 && "${remote_sha}" == "${zero}" ]]; then
       continue
     fi
-    deny "direct push to ${default_branch} on authority '${authority}' is forbidden; open a PR"
+    deny "direct push to ${default_branch} on authority 'origin' is forbidden; open a PR"
   fi
 done
