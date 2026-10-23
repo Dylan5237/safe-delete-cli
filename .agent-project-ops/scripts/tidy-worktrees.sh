@@ -9,7 +9,7 @@
 # Default is a read-only plan; --apply acts. Something is retired only with proof:
 #   merged  GitHub PR MERGED whose head equals or contains the local tip (squash/rebase safe), or,
 #           without gh, upstream origin/<branch> was deleted and the tip is in origin/<default>
-#   closed  GitHub PR CLOSED unmerged: tag archive/<branch>-<sha7> is pushed to origin first
+#   closed  same-origin PR CLOSED unmerged at the current tip: archive/<branch>-<sha7> first
 # Uncommitted/ignored files, commits newer than a merged head, open PRs, no PR, locked or detached
 # folders, folders outside .worktrees/ (other tools) and anything unverifiable are kept and listed.
 # Never touches the default branch, the configured task_base, or long-lived branch names.
@@ -171,19 +171,37 @@ upstream_gone() { # pushed with -u to origin/<branch>, and that branch is gone n
 }
 pr_lines() {
   (cd "$primary" && GH_PROMPT_DISABLED=1 gh pr list -R "$gh_repo" --head "$1" --state all --limit 20 \
-    --json number,state,headRefOid --jq '.[] | "\(.number) \(.state) \(.headRefOid)"' </dev/null 2>/dev/null)
+    --json number,state,headRefOid,headRefName,isCrossRepository,headRepositoryOwner,headRepository \
+    --jq '.[] | [.number, .state, .headRefOid, .headRefName, .isCrossRepository, .headRepositoryOwner.login, .headRepository.name] | map(if . == null then "null" else tostring end) | join(" ")' </dev/null 2>/dev/null)
 }
 
 v_state=""; v_pr=""; v_head=""
-judge() { # branch tip -> v_state: merged|landed|closed|open|ahead|none|unknown
-  local b="$1" tip="$2" lines num state head open_pr="" merged_pr="" merged_head="" closed_pr="" ahead_pr=""
+judge() { # branch tip -> v_state: merged|landed|closed|open|ahead|unmatched|unverified|none|unknown
+  local b="$1" tip="$2" lines num state head head_branch cross owner repo extra
+  local open_pr="" merged_pr="" merged_head="" closed_pr="" ahead_pr="" unmatched_pr="" unverified=0 count=0
   v_state=unknown; v_pr=""; v_head=""
   if [[ "$gh_ok" -eq 1 ]] && lines="$(pr_lines "$b")"; then
-    while read -r num state head; do
+    while read -r num state head head_branch cross owner repo extra; do
       [[ -n "${num:-}" ]] || continue
+      count=$((count + 1))
+      # --head filters by branch name, not its repository. A fork with the same
+      # name is not evidence about origin, even if it happens to share a commit.
+      [[ "$cross" != true ]] || continue
+      if [[ "$cross" != false || -z "$owner" || "$owner" == null || -z "$repo" || "$repo" == null \
+        || -z "$head_branch" || "$head_branch" == null || -n "$extra" ]]; then
+        unverified=1; continue
+      fi
+      [[ "${owner,,}/${repo,,}" == "$gh_repo" && "$head_branch" == "$b" ]] || continue
+      if [[ ! "$num" =~ ^[1-9][0-9]*$ || ! "$head" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        unverified=1; continue
+      fi
+      head="${head,,}"
       case "$state" in
         OPEN) open_pr="$num" ;;
-        CLOSED) closed_pr="$num" ;;
+        CLOSED)
+          # Closing an older incarnation of a branch does not abandon later or
+          # unrelated work. Only this exact task tip may be archived and retired.
+          if [[ "$head" == "$tip" ]]; then closed_pr="$num"; else unmatched_pr="$num"; fi ;;
         MERGED)
           if ! g cat-file -e "$head^{commit}" 2>/dev/null; then
             g fetch --quiet origin "refs/pull/$num/head" >/dev/null 2>&1 || true
@@ -193,11 +211,17 @@ judge() { # branch tip -> v_state: merged|landed|closed|open|ahead|none|unknown
           else
             ahead_pr="$num"
           fi ;;
+        *) unverified=1 ;;
       esac
     done <<< "$lines"
+    # A full page may omit an OPEN PR for this reused branch. Do not infer a
+    # retirement decision from an incomplete history; a visible OPEN still wins.
+    if [[ "$count" -ge 20 ]]; then unverified=1; fi
     if [[ -n "$open_pr" ]]; then v_state=open; v_pr="$open_pr"
+    elif [[ "$unverified" -eq 1 ]]; then v_state=unverified
     elif [[ -n "$merged_pr" ]]; then v_state=merged; v_pr="$merged_pr"; v_head="$merged_head"
     elif [[ -n "$closed_pr" ]]; then v_state=closed; v_pr="$closed_pr"
+    elif [[ -n "$unmatched_pr" ]]; then v_state=unmatched; v_pr="$unmatched_pr"
     elif [[ -n "$ahead_pr" ]]; then v_state=ahead; v_pr="$ahead_pr"
     else v_state=none
     fi
@@ -215,6 +239,8 @@ why() {
     closed) printf 'PR #%s closed without merge' "$v_pr" ;;
     open) printf 'PR #%s open (in progress)' "$v_pr" ;;
     ahead) printf 'has commits newer than merged PR #%s' "$v_pr" ;;
+    unmatched) printf 'current tip differs from closed PR #%s; task preserved' "$v_pr" ;;
+    unverified) printf 'cannot verify PR head repository, branch or commit; task preserved' ;;
     none) printf 'no PR yet (new, parked, or never opened)' ;;
     *) printf 'cannot verify merge without gh (GitHub CLI)' ;;
   esac
@@ -333,6 +359,7 @@ if [[ -n "$abandon" ]]; then
   if [[ "$gh_ok" -eq 1 ]]; then
     judge "$b" "${local_tip:-$remote_tip}"
     [[ "$v_state" != open ]] || refuse "PR #$v_pr is still open; close it first"
+    [[ "$v_state" != unverified ]] || refuse "cannot verify PR history; branch preserved"
   fi
   apply=1
   if [[ -n "$local_tip" ]]; then archive "$b" "$local_tip" "abandoned (decision on the Issue)" || exit 1; fi
